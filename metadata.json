@@ -1,0 +1,6 @@
+{
+  "name": "MicroWrite",
+  "description": "Guided learning & practice tool for structured focus and argumentative writing with offline lesson resource imports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
