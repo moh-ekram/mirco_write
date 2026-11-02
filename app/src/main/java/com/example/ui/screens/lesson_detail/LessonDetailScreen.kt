@@ -59,7 +59,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import android.widget.Toast
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -89,9 +95,12 @@ fun LessonDetailScreen(
     }
 
     val lesson by viewModel.currentLesson.collectAsState()
+    val isRefreshing by viewModel.isRefreshingLesson.collectAsState()
+    val context = LocalContext.current
     var isGuidelinesExpanded by remember { mutableStateOf(true) }
     var showResetDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    var showMoreMenu by remember { mutableStateOf(false) }
 
     val currentLesson = lesson
     val extColors = MaterialTheme.extendedColors
@@ -169,6 +178,56 @@ fun LessonDetailScreen(
                         modifier = Modifier.testTag("lesson_detail_back_button")
                     ) {
                         Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    IconButton(
+                        onClick = {
+                            viewModel.refreshLessonFromSource(currentLesson.id) { success, msg ->
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        enabled = !isRefreshing,
+                        modifier = Modifier.testTag("lesson_detail_top_refresh_button")
+                    ) {
+                        if (isRefreshing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh Lesson from Source")
+                        }
+                    }
+                    Box {
+                        IconButton(
+                            onClick = { showMoreMenu = true },
+                            modifier = Modifier.testTag("lesson_detail_more_menu_button")
+                        ) {
+                            Icon(imageVector = Icons.Default.MoreVert, contentDescription = "More Options")
+                        }
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Reset Progress") },
+                                leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showResetDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete Lesson", color = extColors.danger) },
+                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = extColors.danger, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showDeleteDialog = true
+                                }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -254,17 +313,6 @@ fun LessonDetailScreen(
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
-
-                                currentLesson.titleBn?.let { bn ->
-                                    if (bn.isNotBlank()) {
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                        BanglaAwareText(
-                                            text = bn,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                }
                             }
 
                             Spacer(modifier = Modifier.width(14.dp))
@@ -325,14 +373,31 @@ fun LessonDetailScreen(
                             }
 
                             IconButton(
-                                onClick = { showResetDialog = true },
+                                onClick = {
+                                    viewModel.refreshLessonFromSource(currentLesson.id) { success, msg ->
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                enabled = !isRefreshing,
                                 modifier = Modifier
                                     .size(40.dp)
                                     .clip(CircleShape)
                                     .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    .testTag("detail_reset_button")
+                                    .testTag("detail_refresh_button")
                             ) {
-                                Icon(imageVector = Icons.Default.Refresh, contentDescription = "Reset Progress", tint = extColors.textMuted)
+                                if (isRefreshing) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = "Refresh Lesson from Source",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                             }
                         }
                     }

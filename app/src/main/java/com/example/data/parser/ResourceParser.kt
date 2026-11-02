@@ -19,10 +19,13 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
+import java.io.File
 import java.io.InputStream
 import java.io.StringReader
+import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.regex.Matcher
 import java.util.regex.Pattern
 import java.util.zip.ZipInputStream
 
@@ -60,23 +63,298 @@ class ResourceParser(
             }
         }
 
-        // Normalize any tab-delimited or non-standard tables to markdown tables
-        val normalized = TableParser.convertTextWithTablesToMarkdown(trimmed)
+        // If raw HTML content is provided, convert HTML structures to markdown
+        val convertedHtml = if (trimmed.contains("<html", true) || trimmed.contains("<body", true) ||
+            trimmed.contains("<h2", true) || trimmed.contains("<h3", true) ||
+            trimmed.contains("<table", true) || (trimmed.contains("<p>", true) && trimmed.contains("</p>", true))
+        ) {
+            convertGoogleDocHtmlToMarkdown(trimmed)
+        } else {
+            cleanHtmlEntities(trimmed)
+        }
 
-        // Default to Marker Parser V2 & Shorthand Parser
+        // Normalize any tab-delimited or non-standard tables to markdown tables
+        val normalized = TableParser.convertTextWithTablesToMarkdown(convertedHtml)
+
+        // Default to Marker Parser V2 & Shorthand Parser / Strict Article Parser
         return parseMarkerFormat(normalized)
+    }
+
+    /**
+     * Converts Google Docs and Web HTML export to formatted Markdown, preserving:
+     * - Images, drawings, and charts (as ![alt](url))
+     * - Headings (h2 -> ##, h3 -> ###)
+     * - Tables (table -> Markdown pipe table)
+     * - Bold, underline, and italic formatting
+     * - Paragraphs and bullet lists
+     */
+    fun convertGoogleDocHtmlToMarkdown(html: String): String {
+        if (html.isBlank()) return ""
+
+        // 0. Pre-decode numeric entities (like &#2460; for Bengali characters, digits, and punctuation)
+        // while preserving XML brackets (<, >, &) so tag parsing remains 100% reliable.
+        var content = decodeHtmlEntities(html, preserveXmlBrackets = true)
+
+        // Parse CSS stylesheet before removing <style> tags:
+        // Google Docs HTML export puts styling (bold, italic, underline, strike, sub, super) in CSS classes (.c1, .c2, etc.)
+        val boldClasses = mutableSetOf<String>()
+        val italicClasses = mutableSetOf<String>()
+        val underlineClasses = mutableSetOf<String>()
+        val strikeClasses = mutableSetOf<String>()
+        val superClasses = mutableSetOf<String>()
+        val subClasses = mutableSetOf<String>()
+
+        val styleBlockPattern = Pattern.compile("<style[^>]*>([\\s\\S]*?)</style>", Pattern.CASE_INSENSITIVE)
+        val styleMatcher = styleBlockPattern.matcher(content)
+        while (styleMatcher.find()) {
+            val cssContent = styleMatcher.group(1) ?: ""
+            val rulePattern = Pattern.compile("([^{]+)\\{([^}]+)\\}")
+            val ruleMatcher = rulePattern.matcher(cssContent)
+            while (ruleMatcher.find()) {
+                val selectors = ruleMatcher.group(1) ?: ""
+                val decls = (ruleMatcher.group(2) ?: "").lowercase()
+
+                val isBoldDecl = decls.contains("font-weight:700") || decls.contains("font-weight: 700") ||
+                        decls.contains("font-weight:bold") || decls.contains("font-weight: bold") ||
+                        decls.contains("font-weight:800") || decls.contains("font-weight: 800") ||
+                        decls.contains("font-weight:900") || decls.contains("font-weight: 900")
+                val isItalicDecl = decls.contains("font-style:italic") || decls.contains("font-style: italic")
+                val isUnderlineDecl = decls.contains("text-decoration:underline") || decls.contains("text-decoration: underline") ||
+                        decls.contains("text-decoration-line:underline") || decls.contains("text-decoration-line: underline")
+                val isStrikeDecl = decls.contains("line-through")
+                val isSuperDecl = decls.contains("vertical-align:super") || decls.contains("vertical-align: super")
+                val isSubDecl = decls.contains("vertical-align:sub") || decls.contains("vertical-align: sub")
+
+                val classMatcher = Pattern.compile("\\.([a-zA-Z0-9_-]+)").matcher(selectors)
+                while (classMatcher.find()) {
+                    val cls = classMatcher.group(1) ?: continue
+                    if (isBoldDecl) boldClasses.add(cls)
+                    if (isItalicDecl) italicClasses.add(cls)
+                    if (isUnderlineDecl) underlineClasses.add(cls)
+                    if (isStrikeDecl) strikeClasses.add(cls)
+                    if (isSuperDecl) superClasses.add(cls)
+                    if (isSubDecl) subClasses.add(cls)
+                }
+            }
+        }
+
+        // Strip style and script tags
+        content = content
+            .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), "")
+
+        // 1. Convert Images, Charts & Math Equations:
+        // In Google Docs HTML export, images and charts are exported with hosted urls:
+        // <img src="https://lh7-rt.googleusercontent.com/docsz/..." alt="..." ...>
+        // Note: Equations in Google Docs exports often have their LaTeX expression in the alt attribute!
+        content = content.replace(Regex("<img[^>]+>", RegexOption.IGNORE_CASE)) { matchResult ->
+            val tagHtml = matchResult.value
+            val srcMatch = Regex("src=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE).find(tagHtml)
+            val src = srcMatch?.groupValues?.get(1)?.trim() ?: ""
+            val altMatch = Regex("alt=[\"']([^\"']*)[\"']", RegexOption.IGNORE_CASE).find(tagHtml)
+            val alt = altMatch?.groupValues?.get(1)?.trim() ?: ""
+
+            val isMathFormula = alt.isNotBlank() && (
+                alt.startsWith("$$") || alt.startsWith("\\[") || alt.startsWith("\\(") ||
+                alt.contains("\\frac") || alt.contains("\\sqrt") || alt.contains("_{") || alt.contains("^{") ||
+                alt.contains("\\sum") || alt.contains("\\int") || alt.contains("\\alpha") || alt.contains("\\beta") ||
+                (alt.contains("=") && (alt.contains("/") || alt.contains("+") || alt.contains("-") || alt.contains("*") || alt.contains("_")))
+            )
+
+            if (isMathFormula) {
+                val cleanLatex = alt.removePrefix("$$").removeSuffix("$$")
+                    .removePrefix("\\[").removeSuffix("\\]")
+                    .removePrefix("\\(").removeSuffix("\\)")
+                    .trim()
+                "\n\n$$ $cleanLatex $$\n\n"
+            } else if (src.isNotBlank() && !src.endsWith(".wmf", true) && !src.endsWith(".emf", true)) {
+                val altText = alt.ifBlank { "Image" }
+                "\n\n![$altText]($src)\n\n"
+            } else {
+                ""
+            }
+        }
+
+        // 2. Convert Tables:
+        val tablePattern = Pattern.compile("<table[^>]*>([\\s\\S]*?)</table>", Pattern.CASE_INSENSITIVE)
+        val tableMatcher = tablePattern.matcher(content)
+        val tableSb = StringBuffer()
+        while (tableMatcher.find()) {
+            val tableHtml = tableMatcher.group(1) ?: ""
+            val rows = mutableListOf<List<String>>()
+            val rowPattern = Pattern.compile("<tr[^>]*>([\\s\\S]*?)</tr>", Pattern.CASE_INSENSITIVE)
+            val rowMatcher = rowPattern.matcher(tableHtml)
+            while (rowMatcher.find()) {
+                val rowHtml = rowMatcher.group(1) ?: ""
+                val cellPattern = Pattern.compile("<t[dh][^>]*>([\\s\\S]*?)</t[dh]>", Pattern.CASE_INSENSITIVE)
+                val cellMatcher = cellPattern.matcher(rowHtml)
+                val cells = mutableListOf<String>()
+                while (cellMatcher.find()) {
+                    val rawCell = cellMatcher.group(1) ?: ""
+                    val cleanCell = cleanHtmlEntities(stripHtmlTags(rawCell))
+                        .replace("|", "/")
+                        .replace("\n", " ")
+                        .trim()
+                    cells.add(cleanCell)
+                }
+                if (cells.isNotEmpty() && cells.any { it.isNotBlank() }) {
+                    rows.add(cells)
+                }
+            }
+
+            if (rows.isNotEmpty()) {
+                val markdownTable = buildString {
+                    append("\n\n")
+                    append("| ").append(rows[0].joinToString(" | ")).append(" |\n")
+                    append("| ").append(rows[0].map { "---" }.joinToString(" | ")).append(" |\n")
+                    for (i in 1 until rows.size) {
+                        append("| ").append(rows[i].joinToString(" | ")).append(" |\n")
+                    }
+                    append("\n")
+                }
+                tableMatcher.appendReplacement(tableSb, Matcher.quoteReplacement(markdownTable))
+            } else {
+                tableMatcher.appendReplacement(tableSb, "")
+            }
+        }
+        tableMatcher.appendTail(tableSb)
+        content = tableSb.toString()
+
+        // 3. Headings:
+        content = content.replace(Regex("<h1[^>]*>([\\s\\S]*?)</h1>", RegexOption.IGNORE_CASE)) {
+            val t = cleanHtmlEntities(stripHtmlTags(it.groupValues[1])).trim()
+            "\n\n# $t\n\n"
+        }
+        content = content.replace(Regex("<h2[^>]*>([\\s\\S]*?)</h2>", RegexOption.IGNORE_CASE)) {
+            val t = cleanHtmlEntities(stripHtmlTags(it.groupValues[1])).trim()
+            "\n\n## $t\n\n"
+        }
+        content = content.replace(Regex("<h3[^>]*>([\\s\\S]*?)</h3>", RegexOption.IGNORE_CASE)) {
+            val t = cleanHtmlEntities(stripHtmlTags(it.groupValues[1])).trim()
+            "\n\n### $t\n\n"
+        }
+        content = content.replace(Regex("<h4[^>]*>([\\s\\S]*?)</h4>", RegexOption.IGNORE_CASE)) {
+            val t = cleanHtmlEntities(stripHtmlTags(it.groupValues[1])).trim()
+            "\n\n#### $t\n\n"
+        }
+
+        // 4. Standard HTML tag conversions:
+        content = content
+            .replace(Regex("<(b|strong)>([\\s\\S]*?)</\\1>", RegexOption.IGNORE_CASE)) {
+                val inner = it.groupValues[2]
+                if (inner.isBlank()) inner else "**${inner.trim()}**"
+            }
+            .replace(Regex("<(i|em)>([\\s\\S]*?)</\\1>", RegexOption.IGNORE_CASE)) {
+                val inner = it.groupValues[2]
+                if (inner.isBlank()) inner else "*${inner.trim()}*"
+            }
+            .replace(Regex("<(s|strike|del)>([\\s\\S]*?)</\\1>", RegexOption.IGNORE_CASE)) {
+                val inner = it.groupValues[2]
+                if (inner.isBlank()) inner else "~~${inner.trim()}~~"
+            }
+            .replace(Regex("<sup>([\\s\\S]*?)</sup>", RegexOption.IGNORE_CASE)) {
+                val inner = it.groupValues[1]
+                if (inner.isBlank()) inner else "^{${inner.trim()}}"
+            }
+            .replace(Regex("<sub>([\\s\\S]*?)</sub>", RegexOption.IGNORE_CASE)) {
+                val inner = it.groupValues[1]
+                if (inner.isBlank()) inner else "_{${inner.trim()}}"
+            }
+
+        // 5. Convert <span> tags according to extracted CSS classes and inline style attributes:
+        val spanPattern = Pattern.compile("<span([^>]*)>([^<]*)</span>", Pattern.CASE_INSENSITIVE)
+        var prevContent = ""
+        var iterations = 0
+        while (content != prevContent && iterations < 25) {
+            prevContent = content
+            iterations++
+            val matcher = spanPattern.matcher(content)
+            val sb = StringBuffer()
+            while (matcher.find()) {
+                val attrs = matcher.group(1) ?: ""
+                val text = matcher.group(2) ?: ""
+
+                val classAttrMatch = Pattern.compile("class=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE).matcher(attrs)
+                val spanClasses = if (classAttrMatch.find()) {
+                    (classAttrMatch.group(1) ?: "").split("\\s+".toRegex())
+                } else emptyList()
+
+                val styleAttrMatch = Pattern.compile("style=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE).matcher(attrs)
+                val spanStyle = if (styleAttrMatch.find()) {
+                    (styleAttrMatch.group(1) ?: "").lowercase()
+                } else ""
+
+                val isBold = spanClasses.any { it in boldClasses } ||
+                        spanStyle.contains("font-weight:700") || spanStyle.contains("font-weight: 700") ||
+                        spanStyle.contains("font-weight:bold") || spanStyle.contains("font-weight: bold") ||
+                        spanStyle.contains("font-weight:800") || spanStyle.contains("font-weight: 800") ||
+                        spanStyle.contains("font-weight:900") || spanStyle.contains("font-weight: 900")
+
+                val isItalic = spanClasses.any { it in italicClasses } ||
+                        spanStyle.contains("font-style:italic") || spanStyle.contains("font-style: italic")
+
+                val isUnderline = spanClasses.any { it in underlineClasses } ||
+                        spanStyle.contains("underline")
+
+                val isStrike = spanClasses.any { it in strikeClasses } ||
+                        spanStyle.contains("line-through")
+
+                val isSuper = spanClasses.any { it in superClasses } ||
+                        spanStyle.contains("vertical-align:super") || spanStyle.contains("vertical-align: super")
+
+                val isSub = spanClasses.any { it in subClasses } ||
+                        spanStyle.contains("vertical-align:sub") || spanStyle.contains("vertical-align: sub")
+
+                if (text.isBlank()) {
+                    matcher.appendReplacement(sb, Matcher.quoteReplacement(text))
+                } else {
+                    val leading = text.takeWhile { it.isWhitespace() }
+                    val trailing = text.takeLastWhile { it.isWhitespace() }
+                    var core = text.trim()
+
+                    if (isSub) core = "_{$core}"
+                    if (isSuper) core = "^{$core}"
+                    if (isStrike) core = "~~$core~~"
+                    if (isBold && isItalic) core = "***$core***"
+                    else if (isBold) core = "**$core**"
+                    else if (isItalic) core = "*$core*"
+                    if (isUnderline) core = "<u>$core</u>"
+
+                    matcher.appendReplacement(sb, Matcher.quoteReplacement("$leading$core$trailing"))
+                }
+            }
+            matcher.appendTail(sb)
+            content = sb.toString()
+        }
+
+        // 6. Paragraphs, List Items, and Linebreaks:
+        content = content.replace(Regex("<p[^>]*>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("</p>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("<br[^>]*>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("<li[^>]*>", RegexOption.IGNORE_CASE), "\n• ")
+            .replace(Regex("</li>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("</?[ou]l[^>]*>", RegexOption.IGNORE_CASE), "\n")
+
+        // 7. Strip remaining HTML tags (except u, b, i, ins, sub, sup):
+        content = content.replace(Regex("<(?!(?:u|/u|b|/b|i|/i|ins|/ins|sub|/sub|sup|/sup)\\b)[^>]+>"), "")
+
+        // 8. Clean HTML entities:
+        content = cleanHtmlEntities(content)
+
+        return content.trim()
     }
 
     /**
      * Parses a .docx document from InputStream by reading word/document.xml
      */
-    suspend fun parseDocx(inputStream: InputStream): List<ParsedLessonPreview> = withContext(Dispatchers.IO) {
-        val extractedText = extractTextFromDocx(inputStream)
+    suspend fun parseDocx(inputStream: InputStream, imageOutputDir: File? = null): List<ParsedLessonPreview> = withContext(Dispatchers.IO) {
+        val extractedText = extractTextFromDocx(inputStream, imageOutputDir)
         parseContent(extractedText)
     }
 
     /**
-     * Fetches public Google Doc plain text via export URL, automatically discovering all tabs if present.
+     * Fetches public Google Doc plain text or HTML via export URL, automatically discovering all tabs if present.
+     * Retains images, charts, drawings, tables, and headings with highest fidelity.
      */
     suspend fun fetchAndParseGoogleDocs(url: String): Pair<List<ParsedLessonPreview>, String?> = withContext(Dispatchers.IO) {
         val cleanUrl = url.replace("*", ".").trim()
@@ -104,34 +382,64 @@ class ResourceParser(
         for (tab in allTabs) {
             val tabParsed = mutableListOf<ParsedLessonPreview>()
 
-            // 1. Try DOCX export first (full preservation of Google Doc tables, columns, rows, formatting)
-            val docxUrl = "https://docs.google.com/document/d/$docId/export?format=docx&tab=$tab"
+            // 1. Try HTML export first (highest fidelity: public Google images, drawings, charts, H2/H3 headings, tables, bold, underline)
+            val htmlUrl = "https://docs.google.com/document/d/$docId/export?format=html&tab=$tab"
             try {
-                val docxReq = Request.Builder()
-                    .url(docxUrl)
+                val htmlReq = Request.Builder()
+                    .url(htmlUrl)
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                     .build()
-                val docxResp = okHttpClient.newCall(docxReq).execute()
-                docxResp.use { r ->
+                val htmlResp = okHttpClient.newCall(htmlReq).execute()
+                htmlResp.use { r ->
                     if (r.isSuccessful && r.body != null) {
-                        val contentType = r.header("Content-Type") ?: ""
-                        if (!contentType.contains("text/html")) {
-                            val stream = r.body!!.byteStream()
-                            val textFromDocx = extractTextFromDocx(stream)
-                            if (textFromDocx.isNotBlank()) {
-                                val parsed = parseContent(textFromDocx)
+                        val bodyHtml = r.body!!.string()
+                        if (bodyHtml.isNotBlank()) {
+                            val markdown = convertGoogleDocHtmlToMarkdown(bodyHtml)
+                            if (markdown.isNotBlank()) {
+                                val parsed = parseContent(markdown)
                                 if (parsed.isNotEmpty()) {
                                     tabParsed.addAll(parsed)
                                 }
                             }
                         }
+                    } else if (r.code == 401 || r.code == 403) {
+                        lastError = "Google Doc is private. Please set link sharing to 'Anyone with the link can view'."
                     }
                 }
             } catch (_: Exception) {
-                // Fallback to TXT export
+                // Fallback to DOCX export
             }
 
-            // 2. If DOCX export yielded no lessons, fallback to TXT export
+            // 2. Try DOCX export if HTML didn't yield lessons
+            if (tabParsed.isEmpty()) {
+                val docxUrl = "https://docs.google.com/document/d/$docId/export?format=docx&tab=$tab"
+                try {
+                    val docxReq = Request.Builder()
+                        .url(docxUrl)
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                        .build()
+                    val docxResp = okHttpClient.newCall(docxReq).execute()
+                    docxResp.use { r ->
+                        if (r.isSuccessful && r.body != null) {
+                            val contentType = r.header("Content-Type") ?: ""
+                            if (!contentType.contains("text/html")) {
+                                val stream = r.body!!.byteStream()
+                                val textFromDocx = extractTextFromDocx(stream)
+                                if (textFromDocx.isNotBlank()) {
+                                    val parsed = parseContent(textFromDocx)
+                                    if (parsed.isNotEmpty()) {
+                                        tabParsed.addAll(parsed)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Fallback to TXT export
+                }
+            }
+
+            // 3. Fallback to TXT export if both HTML and DOCX yielded no lessons
             if (tabParsed.isEmpty()) {
                 val exportUrl = "https://docs.google.com/document/d/$docId/export?format=txt&tab=$tab"
                 val request = Request.Builder()
@@ -215,24 +523,222 @@ class ResourceParser(
     }
 
     /**
-     * Extracts text and tables from DOCX archive's word/document.xml
+     * Extracts text, structure, formatting, LaTeX math, images, and tables from DOCX archive.
      */
-    fun extractTextFromDocx(inputStream: InputStream): String {
+    fun extractTextFromDocx(inputStream: InputStream, imageOutputDir: File? = null): String {
         val zip = ZipInputStream(inputStream)
-        val sb = StringBuilder()
+        var docXml: String? = null
+        var relsXml: String? = null
+        val mediaMap = mutableMapOf<String, String>()
+
         var entry = zip.nextEntry
         while (entry != null) {
-            if (entry.name == "word/document.xml") {
-                val xmlContent = zip.bufferedReader(Charsets.UTF_8).readText()
-                parseWordDocumentXml(xmlContent, sb)
-                break
+            val name = entry.name
+            when {
+                name == "word/document.xml" -> {
+                    docXml = zip.bufferedReader(Charsets.UTF_8).readText()
+                }
+                name == "word/_rels/document.xml.rels" -> {
+                    relsXml = zip.bufferedReader(Charsets.UTF_8).readText()
+                }
+                name.startsWith("word/media/") -> {
+                    val fileName = name.substringAfterLast("/")
+                    // Skip legacy WMF and EMF vector images that Word creates as equation previews
+                    if (!fileName.endsWith(".wmf", true) && !fileName.endsWith(".emf", true)) {
+                        val bytes = zip.readBytes()
+                        if (imageOutputDir != null) {
+                            try {
+                                imageOutputDir.mkdirs()
+                                val imgFile = File(imageOutputDir, fileName)
+                                imgFile.writeBytes(bytes)
+                                mediaMap[fileName] = "file://${imgFile.absolutePath}"
+                            } catch (_: Exception) {
+                                val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                                val mime = if (fileName.endsWith(".png", true)) "image/png" else "image/jpeg"
+                                mediaMap[fileName] = "data:$mime;base64,$base64"
+                            }
+                        } else {
+                            val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                            val mime = if (fileName.endsWith(".png", true)) "image/png" else "image/jpeg"
+                            mediaMap[fileName] = "data:$mime;base64,$base64"
+                        }
+                    }
+                }
             }
             entry = zip.nextEntry
         }
+
+        if (docXml == null) return ""
+
+        val relsMap = mutableMapOf<String, String>()
+        if (relsXml != null) {
+            val relPattern = Pattern.compile("<Relationship[^>]+Id=[\"']([^\"']+)[\"'][^>]+Target=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE)
+            val relMatcher = relPattern.matcher(relsXml)
+            while (relMatcher.find()) {
+                val id = relMatcher.group(1) ?: ""
+                val target = relMatcher.group(2) ?: ""
+                val targetFile = target.substringAfterLast("/")
+                val uri = mediaMap[targetFile]
+                if (uri != null) {
+                    relsMap[id] = uri
+                }
+            }
+        }
+
+        val sb = StringBuilder()
+        parseWordDocumentXml(docXml, relsMap, sb)
         return sb.toString()
     }
 
+    private data class MathXmlNode(
+        val tag: String,
+        val text: String = "",
+        val children: MutableList<MathXmlNode> = mutableListOf(),
+        val attrs: Map<String, String> = emptyMap()
+    )
+
+    private fun parseOmmlSubtree(parser: XmlPullParser): String {
+        val rootTag = parser.name?.substringAfterLast(":")?.lowercase() ?: "omath"
+        val rootNode = MathXmlNode(rootTag)
+        val stack = ArrayDeque<MathXmlNode>()
+        stack.push(rootNode)
+
+        var depth = 1
+        while (depth > 0 && parser.next() != XmlPullParser.END_DOCUMENT) {
+            val eventType = parser.eventType
+            val rawName = parser.name ?: ""
+            val tag = rawName.substringAfterLast(":").lowercase()
+
+            when (eventType) {
+                XmlPullParser.START_TAG -> {
+                    depth++
+                    val attrs = mutableMapOf<String, String>()
+                    for (i in 0 until parser.attributeCount) {
+                        val aName = parser.getAttributeName(i).substringAfterLast(":").lowercase()
+                        attrs[aName] = parser.getAttributeValue(i) ?: ""
+                    }
+                    val node = MathXmlNode(tag, attrs = attrs)
+                    stack.peek().children.add(node)
+                    stack.push(node)
+                }
+                XmlPullParser.TEXT -> {
+                    val t = parser.text
+                    if (!t.isNullOrEmpty()) {
+                        stack.peek().children.add(MathXmlNode("#text", text = t))
+                    }
+                }
+                XmlPullParser.END_TAG -> {
+                    depth--
+                    if (stack.size > 1) {
+                        stack.pop()
+                    }
+                }
+            }
+        }
+
+        return nodeToLatex(rootNode).trim()
+    }
+
+    private fun nodeToLatex(node: MathXmlNode): String {
+        return when (node.tag) {
+            "#text" -> node.text
+            "t" -> {
+                val raw = node.children.joinToString("") { nodeToLatex(it) }
+                cleanOmmlText(raw)
+            }
+            "f" -> {
+                val num = node.children.find { it.tag == "num" }?.let { nodeToLatex(it).trim() } ?: ""
+                val den = node.children.find { it.tag == "den" }?.let { nodeToLatex(it).trim() } ?: ""
+                "\\frac{$num}{$den}"
+            }
+            "ssub" -> {
+                val base = node.children.find { it.tag == "e" }?.let { nodeToLatex(it).trim() } ?: ""
+                val sub = node.children.find { it.tag == "sub" }?.let { nodeToLatex(it).trim() } ?: ""
+                "${base}_{$sub}"
+            }
+            "ssup" -> {
+                val base = node.children.find { it.tag == "e" }?.let { nodeToLatex(it).trim() } ?: ""
+                val sup = node.children.find { it.tag == "sup" }?.let { nodeToLatex(it).trim() } ?: ""
+                "${base}^{$sup}"
+            }
+            "ssubsup" -> {
+                val base = node.children.find { it.tag == "e" }?.let { nodeToLatex(it).trim() } ?: ""
+                val sub = node.children.find { it.tag == "sub" }?.let { nodeToLatex(it).trim() } ?: ""
+                val sup = node.children.find { it.tag == "sup" }?.let { nodeToLatex(it).trim() } ?: ""
+                "${base}_{$sub}^{$sup}"
+            }
+            "rad" -> {
+                val deg = node.children.find { it.tag == "deg" }?.let { nodeToLatex(it).trim() } ?: ""
+                val base = node.children.find { it.tag == "e" }?.let { nodeToLatex(it).trim() } ?: ""
+                if (deg.isNotEmpty()) "\\sqrt[$deg]{$base}" else "\\sqrt{$base}"
+            }
+            "d" -> {
+                val beg = node.children.find { it.tag == "dpr" }?.children?.find { it.tag == "begchr" }?.attrs?.get("val") ?: "("
+                val end = node.children.find { it.tag == "dpr" }?.children?.find { it.tag == "endchr" }?.attrs?.get("val") ?: ")"
+                val inner = node.children.filter { it.tag == "e" }.joinToString(", ") { nodeToLatex(it).trim() }
+                "$beg$inner$end"
+            }
+            "bar" -> {
+                val base = node.children.find { it.tag == "e" }?.let { nodeToLatex(it).trim() } ?: ""
+                "\\overline{$base}"
+            }
+            "func" -> {
+                val fname = node.children.find { it.tag == "fname" }?.let { nodeToLatex(it).trim() } ?: ""
+                val base = node.children.find { it.tag == "e" }?.let { nodeToLatex(it).trim() } ?: ""
+                "$fname $base"
+            }
+            "nary" -> {
+                val chr = node.children.find { it.tag == "narypr" }?.children?.find { it.tag == "chr" }?.attrs?.get("val") ?: "∑"
+                val op = when (chr) {
+                    "∑" -> "\\sum"
+                    "∏" -> "\\prod"
+                    "∫" -> "\\int"
+                    else -> chr
+                }
+                val sub = node.children.find { it.tag == "sub" }?.let { nodeToLatex(it).trim() }?.let { "_{$it}" } ?: ""
+                val sup = node.children.find { it.tag == "sup" }?.let { nodeToLatex(it).trim() }?.let { "^{$it}" } ?: ""
+                val base = node.children.find { it.tag == "e" }?.let { nodeToLatex(it).trim() } ?: ""
+                "$op$sub$sup $base"
+            }
+            "m" -> {
+                val rows = node.children.filter { it.tag == "mr" }.map { mr ->
+                    mr.children.filter { it.tag == "e" }.joinToString(" & ") { nodeToLatex(it).trim() }
+                }
+                "\\begin{matrix} " + rows.joinToString(" \\\\ ") + " \\end{matrix}"
+            }
+            else -> {
+                node.children.joinToString("") { nodeToLatex(it) }
+            }
+        }
+    }
+
+    private fun cleanOmmlText(raw: String): String {
+        return raw
+            .replace("≤", " \\le ")
+            .replace("≥", " \\ge ")
+            .replace("≠", " \\ne ")
+            .replace("×", " \\times ")
+            .replace("÷", " \\div ")
+            .replace("±", " \\pm ")
+            .replace("∞", " \\infty ")
+            .replace("→", " \\to ")
+            .replace("≈", " \\approx ")
+            .replace("α", "\\alpha")
+            .replace("β", "\\beta")
+            .replace("γ", "\\gamma")
+            .replace("δ", "\\delta")
+            .replace("λ", "\\lambda")
+            .replace("μ", "\\mu")
+            .replace("σ", "\\sigma")
+            .replace("θ", "\\theta")
+            .replace("π", "\\pi")
+    }
+
     private fun parseWordDocumentXml(xml: String, sb: StringBuilder) {
+        parseWordDocumentXml(xml, emptyMap(), sb)
+    }
+
+    private fun parseWordDocumentXml(xml: String, relsMap: Map<String, String>, sb: StringBuilder) {
         try {
             val factory = XmlPullParserFactory.newInstance()
             factory.isNamespaceAware = true
@@ -245,6 +751,19 @@ class ResourceParser(
             var isFirstRowOfTable = false
             val rowCells = mutableListOf<String>()
             val currentCellText = StringBuilder()
+
+            var headingPrefix = ""
+            var listLevel = -1
+            val currentParaText = StringBuilder()
+
+            var inRun = false
+            var isBold = false
+            var isItalic = false
+            var isUnderline = false
+            var isSubscript = false
+            var isSuperscript = false
+
+            var inFallback = false
 
             while (eventType != XmlPullParser.END_DOCUMENT) {
                 val rawName = parser.name ?: ""
@@ -266,30 +785,128 @@ class ResourceParser(
                                 currentCellText.clear()
                             }
                             "p" -> {
-                                if (inTableCell && currentCellText.isNotEmpty()) {
-                                    currentCellText.append(" ")
+                                headingPrefix = ""
+                                listLevel = -1
+                                currentParaText.clear()
+                            }
+                            "pstyle" -> {
+                                val styleVal = parser.getAttributeValue(null, "val")
+                                    ?: parser.getAttributeValue("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "val")
+                                    ?: ""
+                                val lowerStyle = styleVal.lowercase().replace(" ", "").replace("_", "")
+                                when {
+                                    lowerStyle.contains("heading1") || lowerStyle.contains("title") -> headingPrefix = "# "
+                                    lowerStyle.contains("heading2") -> headingPrefix = "## "
+                                    lowerStyle.contains("heading3") -> headingPrefix = "### "
+                                    lowerStyle.contains("heading4") -> headingPrefix = "#### "
+                                }
+                            }
+                            "ilvl" -> {
+                                val lvlVal = parser.getAttributeValue(null, "val")
+                                    ?: parser.getAttributeValue("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "val")
+                                    ?: "0"
+                                listLevel = lvlVal.toIntOrNull() ?: 0
+                            }
+                            "r" -> {
+                                inRun = true
+                                isBold = false
+                                isItalic = false
+                                isUnderline = false
+                                isSubscript = false
+                                isSuperscript = false
+                            }
+                            "vertalign" -> {
+                                val vVal = parser.getAttributeValue(null, "val")
+                                    ?: parser.getAttributeValue("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "val")
+                                    ?: ""
+                                if (vVal.equals("subscript", ignoreCase = true)) {
+                                    isSubscript = true
+                                } else if (vVal.equals("superscript", ignoreCase = true)) {
+                                    isSuperscript = true
+                                }
+                            }
+                            "b" -> {
+                                val bVal = parser.getAttributeValue(null, "val") ?: "true"
+                                isBold = bVal != "0" && bVal != "false"
+                            }
+                            "i" -> {
+                                val iVal = parser.getAttributeValue(null, "val") ?: "true"
+                                isItalic = iVal != "0" && iVal != "false"
+                            }
+                            "u" -> {
+                                val uVal = parser.getAttributeValue(null, "val") ?: "single"
+                                isUnderline = uVal != "none"
+                            }
+                            "fallback" -> {
+                                inFallback = true
+                            }
+                            "omathpara" -> {
+                                val latex = parseOmmlSubtree(parser)
+                                if (latex.isNotBlank()) {
+                                    val mathStr = "\n\n$$ $latex $$\n\n"
+                                    if (inTableCell) currentCellText.append(mathStr) else currentParaText.append(mathStr)
+                                }
+                            }
+                            "omath" -> {
+                                val latex = parseOmmlSubtree(parser)
+                                if (latex.isNotBlank()) {
+                                    val mathStr = "$ $latex $"
+                                    if (inTableCell) currentCellText.append(mathStr) else currentParaText.append(mathStr)
+                                }
+                            }
+                            "blip" -> {
+                                if (!inFallback) {
+                                    val embedId = parser.getAttributeValue(null, "embed")
+                                        ?: parser.getAttributeValue("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "embed")
+                                        ?: ""
+                                    val imgUri = relsMap[embedId]
+                                    if (imgUri != null && !imgUri.endsWith(".wmf", true) && !imgUri.endsWith(".emf", true)) {
+                                        val imgMd = "\n\n![Image]($imgUri)\n\n"
+                                        if (inTableCell) currentCellText.append(" [Image] ") else currentParaText.append(imgMd)
+                                    }
+                                }
+                            }
+                            "imagedata" -> {
+                                if (!inFallback) {
+                                    val id = parser.getAttributeValue(null, "id")
+                                        ?: parser.getAttributeValue("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id")
+                                        ?: ""
+                                    val imgUri = relsMap[id]
+                                    if (imgUri != null && !imgUri.endsWith(".wmf", true) && !imgUri.endsWith(".emf", true)) {
+                                        val imgMd = "\n\n![Image]($imgUri)\n\n"
+                                        if (inTableCell) currentCellText.append(" [Image] ") else currentParaText.append(imgMd)
+                                    }
                                 }
                             }
                             "tab" -> {
-                                if (inTableCell) {
-                                    currentCellText.append(" ")
-                                } else {
-                                    sb.append("\t")
-                                }
+                                if (inTableCell) currentCellText.append(" ") else currentParaText.append("\t")
                             }
                             "br" -> {
-                                if (inTableCell) {
-                                    currentCellText.append(" ")
-                                } else {
-                                    sb.append("\n")
-                                }
+                                if (inTableCell) currentCellText.append(" ") else currentParaText.append("\n")
                             }
                             "t" -> {
                                 val text = parser.nextText()
-                                if (inTableCell) {
-                                    currentCellText.append(text)
+                                val leading = text.takeWhile { it.isWhitespace() }
+                                val trailing = text.takeLastWhile { it.isWhitespace() }
+                                val core = text.trim()
+                                val formattedText = if (core.isEmpty()) {
+                                    text
                                 } else {
-                                    sb.append(text)
+                                    var c = core
+                                    if (isSubscript) c = "_{$c}"
+                                    else if (isSuperscript) c = "^{$c}"
+
+                                    if (isBold && isItalic) c = "***$c***"
+                                    else if (isBold) c = "**$c**"
+                                    else if (isItalic) c = "*$c*"
+                                    if (isUnderline) c = "<u>$c</u>"
+                                    "$leading$c$trailing"
+                                }
+
+                                if (inTableCell) {
+                                    currentCellText.append(formattedText)
+                                } else {
+                                    currentParaText.append(formattedText)
                                 }
                             }
                         }
@@ -320,9 +937,26 @@ class ResourceParser(
                                 isFirstRowOfTable = false
                                 sb.append("\n")
                             }
+                            "r" -> {
+                                inRun = false
+                            }
+                            "fallback" -> {
+                                inFallback = false
+                            }
                             "p" -> {
                                 if (!inTableCell) {
-                                    sb.append("\n")
+                                    val paraContent = currentParaText.toString().trim()
+                                    if (paraContent.isNotEmpty()) {
+                                        if (headingPrefix.isNotEmpty()) {
+                                            sb.append(headingPrefix).append(paraContent).append("\n\n")
+                                        } else if (listLevel >= 0) {
+                                            val indent = "  ".repeat(listLevel)
+                                            sb.append(indent).append("- ").append(paraContent).append("\n")
+                                        } else {
+                                            sb.append(paraContent).append("\n\n")
+                                        }
+                                    }
+                                    currentParaText.clear()
                                 }
                             }
                         }
@@ -380,6 +1014,8 @@ class ResourceParser(
     private fun isLessonStartLine(line: String): Boolean {
         val clean = line.replace("\uFEFF", "").replace("\u200B", "").trim()
         val upper = clean.uppercase()
+        if (upper.startsWith("@IMPORT")) return false
+        if (clean.startsWith("$$")) return false
         return upper.startsWith("LESSON TITLE:") ||
                 upper.startsWith("LESSON TITLE :") ||
                 upper.startsWith("LESSON:") ||
@@ -395,7 +1031,7 @@ class ResourceParser(
                 upper.startsWith("@ARGUMENTATIVE") ||
                 upper.startsWith("\$ARGUMENTATIVE") ||
                 clean.startsWith("@") ||
-                clean.startsWith("$")
+                (clean.startsWith("$") && Regex("""^\$[A-Za-z]""").containsMatchIn(clean) && !clean.startsWith("$\\"))
     }
 
     private fun splitIntoLessonBlocks(lines: List<String>): List<List<String>> {
@@ -430,7 +1066,254 @@ class ResourceParser(
         return blocks
     }
 
+    private fun parseStrictArticleBlock(lines: List<String>): ParsedLessonPreview {
+        val issues = mutableListOf<ImportValidationIssue>()
+
+        val firstLine = lines.firstOrNull { it.isNotBlank() }?.replace("\uFEFF", "")?.replace("\u200B", "")?.trim() ?: ""
+        // Rule: Article Title starts with '@' - "শুরু হবে ‘@’ দিয়ে। আর কোন টাইপ কিছু থাকবে না।"
+        val rawTitle = firstLine.replace(Regex("^[#@$\\s]+"), "").trim()
+        val title = rawTitle
+            .replace(Regex("^(?:Title|Topic)[:\\s-]*", RegexOption.IGNORE_CASE), "")
+            .trim(' ', ':', '-', '[', ']', '"', '\'')
+            .ifBlank { "Untitled Article" }
+
+        val lessonId = generateLessonId(title)
+        val titleBn = if (hasBengaliChars(title)) title else null
+
+        // Rule: Basic guidelines (Mandatory)
+        // "অবস্থান হবেঃ আর্টিকেল টাইটেলের ঠিক নিচে এবং প্রথম সেকশন টাইটেলের ঠিক উপরে উপরে বেসিক গাইডলাইন থাকবে।"
+        // "‘[’ দিয়ে শুরু হবে ‘]’ দিয়ে শেষ হবে।"
+        val basicGuidelineLines = mutableListOf<String>()
+
+        class StrictSectionDraft(
+            val title: String,
+            val guideLines: MutableList<String> = mutableListOf(),
+            val answerLines: MutableList<String> = mutableListOf(),
+            var isReadingGuide: Boolean = false,
+            var guideFinished: Boolean = false
+        )
+
+        val sectionDrafts = mutableListOf<StrictSectionDraft>()
+        var firstSectionFound = false
+
+        // Drop the title line
+        var skippedTitle = false
+        val contentLines = lines.filter { line ->
+            val t = line.trim()
+            if (!skippedTitle && (t == firstLine || t.replace(Regex("^[#@$\\s]+"), "") == rawTitle || t.startsWith("@") || t.startsWith("$") || t.startsWith("# @") || t.startsWith("#$"))) {
+                skippedTitle = true
+                false
+            } else {
+                true
+            }
+        }
+
+        fun isSubsection(text: String): Boolean {
+            val clean = text.replace(Regex("^[*_#\\-*•\\s]+"), "").trim()
+            return Regex("^([০-৯]+|\\d+)\\.([০-৯]+|\\d+)").containsMatchIn(clean)
+        }
+
+        fun detectCandidateTitle(line: String): String? {
+            val trimmed = line.trim()
+            if (trimmed.isBlank() || trimmed.startsWith("@") || trimmed.startsWith("$")) return null
+            if (isSectionEndMarker(trimmed.uppercase())) return null
+
+            // Rule: Subsections MUST NOT be treated as section titles
+            // "আবার যদি কোন লাইন সাবসেকশন অনুযায়ী নাম্বারিং করা থাকে যেমন ১.১ বা ৫.৩ এগুলো সেকশন বা সেকশন টাইটেল হিসেবে চিহ্নিত হবে না। তারা পূর্ববর্তী সেকশনের অন্তর্ভূক্ত থাকবে।"
+            if (isSubsection(trimmed)) {
+                return null
+            }
+
+            // Rule: Heading 2 ONLY
+            // User requirement: "এখন থেকে শুধু H2 হেডিং স্টাইলই সেকশন টাইটেল হিসেবে চিহ্নিত হবে। H3 হবে না।"
+            val headingMatch = Regex("^##\\s+(.+)$").find(trimmed)
+            if (headingMatch != null) {
+                val candidate = headingMatch.groupValues[1].trim()
+                if (candidate.isNotBlank() && !isSubsection(candidate)) {
+                    return cleanSectionTitle(candidate)
+                }
+            }
+
+            // HTML <h2> ONLY
+            val htmlHeadingMatch = Regex("^<h2[^>]*>([\\s\\S]+?)</h2>$", RegexOption.IGNORE_CASE).find(trimmed)
+            if (htmlHeadingMatch != null) {
+                val candidate = cleanHtmlEntities(stripHtmlTags(htmlHeadingMatch.groupValues[1])).trim()
+                if (candidate.isNotBlank() && !isSubsection(candidate)) {
+                    return cleanSectionTitle(candidate)
+                }
+            }
+
+            return null
+        }
+
+        for (line in contentLines) {
+            val trimmed = line.trim()
+            val upper = trimmed.uppercase()
+            if (upper == "LESSON END" || upper == "END LESSON") {
+                break
+            }
+
+            if (!firstSectionFound) {
+                val candTitle = detectCandidateTitle(line)
+                if (candTitle != null) {
+                    firstSectionFound = true
+                    sectionDrafts.add(StrictSectionDraft(candTitle))
+                } else {
+                    if (trimmed.isNotBlank()) {
+                        val cleanGuideline = if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                            trimmed.removePrefix("[").removeSuffix("]").trim()
+                        } else {
+                            trimmed.removePrefix("[").removeSuffix("]").trim()
+                        }
+                        if (cleanGuideline.isNotBlank()) {
+                            basicGuidelineLines.add(cleanGuideline)
+                        }
+                    }
+                }
+            } else {
+                val currentSec = sectionDrafts.last()
+                val candTitle = detectCandidateTitle(line)
+
+                if (candTitle != null) {
+                    // Rule: Consecutive section headings must BOTH be recognized as distinct sections
+                    // "পরপর দুটি প্রকৃত সেকশন হেডিং থাকলে উভয়টিকে স্বতন্ত্র সেকশন হিসেবে শনাক্ত করো। অর্থাৎ প্রথমটিতে কোনো সাধারণ লেখা বা গাইডলাইন না থাকলেও দ্বিতীয়টিকে নতুন সেকশন হিসেবেই গণ্য করো, ভুল করে সাধারণ লেখা হিসেবে নিচে যুক্ত করবে না।"
+                    if (currentSec.isReadingGuide) {
+                        currentSec.isReadingGuide = false
+                        currentSec.guideFinished = true
+                    }
+                    sectionDrafts.add(StrictSectionDraft(candTitle))
+                } else {
+                    if (trimmed.isBlank() && !currentSec.isReadingGuide) {
+                        if (currentSec.answerLines.isNotEmpty()) {
+                            currentSec.answerLines.add(line)
+                        }
+                        continue
+                    }
+
+                    // Content for current section: either section guideline or answer
+                    // "সেকশন টাইটেলের ঠিক নিচে সেকশন গাইডলাইন থাকবে। এই অংশটি মেন্ডাটরি না।"
+                    // "সেকশন টাইটেলের ঠিক নিচে যদি ‘[]’ র মধ্যে কিছু থাকে সেটি সেই সেকশনের গাইডলাইন হিসেবে চিহ্নিত হবে। কিছু না থাকলে সেই সেকশনের গাইডলাইন থাকবে না।"
+                    if (!currentSec.guideFinished && currentSec.answerLines.none { it.isNotBlank() }) {
+                        if (currentSec.isReadingGuide) {
+                            if (trimmed.contains("]")) {
+                                currentSec.isReadingGuide = false
+                                currentSec.guideFinished = true
+                                val before = trimmed.substringBefore("]").trim()
+                                val after = trimmed.substringAfter("]").trim()
+                                if (before.isNotBlank()) currentSec.guideLines.add(before)
+                                if (after.isNotBlank()) currentSec.answerLines.add(after)
+                            } else {
+                                currentSec.guideLines.add(trimmed)
+                            }
+                        } else if (trimmed.startsWith("[")) {
+                            if (trimmed.endsWith("]")) {
+                                val inner = trimmed.removePrefix("[").removeSuffix("]").trim()
+                                if (inner.isNotBlank()) currentSec.guideLines.add(inner)
+                                currentSec.guideFinished = true
+                            } else if (trimmed.contains("]")) {
+                                val before = trimmed.substringBefore("]").removePrefix("[").trim()
+                                val after = trimmed.substringAfter("]").trim()
+                                if (before.isNotBlank()) currentSec.guideLines.add(before)
+                                if (after.isNotBlank()) currentSec.answerLines.add(after)
+                                currentSec.guideFinished = true
+                            } else {
+                                currentSec.isReadingGuide = true
+                                val inner = trimmed.removePrefix("[").trim()
+                                if (inner.isNotBlank()) currentSec.guideLines.add(inner)
+                            }
+                        } else {
+                            // No bracket immediately beneath section title: section has NO guideline!
+                            currentSec.guideFinished = true
+                            currentSec.answerLines.add(line)
+                        }
+                    } else {
+                        // Answering regular text / bullet / table / image
+                        currentSec.answerLines.add(line)
+                    }
+                }
+            }
+        }
+
+        val basicGuidelines = parseGuidelines(basicGuidelineLines)
+        val sections = mutableListOf<LessonSection>()
+
+        if (sectionDrafts.isEmpty()) {
+            // Fallback if no section title was detected
+            sections.add(
+                LessonSection(
+                    id = "${lessonId}_sec_1",
+                    lessonId = lessonId,
+                    order = 1,
+                    title = title,
+                    type = "Writing",
+                    guide = SectionGuide(emptyList(), emptyList(), emptyList(), emptyList()),
+                    task = "",
+                    timerSeconds = 0,
+                    modelAnswer = contentLines.joinToString("\n").trim()
+                )
+            )
+        } else {
+            for ((index, draft) in sectionDrafts.withIndex()) {
+                val order = index + 1
+                val guide = parseSectionGuide(draft.guideLines)
+                val modelAnswer = draft.answerLines.joinToString("\n").trim()
+                sections.add(
+                    LessonSection(
+                        id = "${lessonId}_sec_$order",
+                        lessonId = lessonId,
+                        order = order,
+                        title = draft.title,
+                        type = "Writing",
+                        guide = guide,
+                        task = "",
+                        timerSeconds = 0,
+                        modelAnswer = modelAnswer
+                    )
+                )
+            }
+        }
+
+        val totalMinutes = (sections.size * 5).coerceAtLeast(15)
+
+        // Strict minimal structure: article title, basic guidelines, section title, section guideline, section answer
+        // "প্রতিটি আর্টিকেল/লেসনে উপরে উল্লেখিত article title, basic guidelines , section title, section guideline বাদে অতিরিক্ত কিছু থাকবে না। কোন ডেস্ক্রিপশন, স্পেশাল গাইডলাইন, ইত্যাদি কিছুই থাকবে না।"
+        val lesson = Lesson(
+            id = lessonId,
+            title = title,
+            titleBn = titleBn,
+            type = "Writing",
+            category = "General",
+            description = "",
+            estimatedMinutes = totalMinutes,
+            guidelines = basicGuidelines,
+            sections = sections,
+            finalReview = FinalReview(emptyList())
+        )
+
+        return ParsedLessonPreview(lesson, issues)
+    }
+
     private fun parseSingleLessonBlock(lines: List<String>): ParsedLessonPreview {
+        val firstLine = lines.firstOrNull { it.isNotBlank() }?.replace("\uFEFF", "")?.replace("\u200B", "")?.trim() ?: ""
+
+        val hasLegacyMarkers = lines.any {
+            val u = it.trim().uppercase()
+            u.startsWith("LESSON TITLE:") || u == "GENERAL GUIDELINES START" ||
+            u == "FINAL REVIEW START" || u.startsWith("SECTION 1") ||
+            u.startsWith("SECTION1") || u.startsWith("SECTION 2") || u.startsWith("SECTION2") ||
+            u.startsWith("-DESCRIPTION:") || u.startsWith("DESCRIPTION:") ||
+            u.startsWith("-GUIDELINES:") || u.startsWith("GUIDELINES:") ||
+            u.startsWith("-ANSWER:") || u.startsWith("ANSWER:") || u == "ANSWER" ||
+            u.startsWith("-TASK:") || u.startsWith("TASK:") ||
+            u.startsWith("-GUIDE:") || u.startsWith("GUIDE:") || u == "GUIDE"
+        }
+
+        val cleanFirst = firstLine.replace(Regex("^[#\\s]+"), "").trim()
+        val isStrictArticle = cleanFirst.startsWith("@") || cleanFirst.startsWith("$")
+        if ((firstLine.startsWith("@") || firstLine.startsWith("$") || isStrictArticle) && !hasLegacyMarkers) {
+            return parseStrictArticleBlock(lines)
+        }
+
         val issues = mutableListOf<ImportValidationIssue>()
 
         var title = ""
@@ -440,8 +1323,6 @@ class ResourceParser(
 
         val guidelinesLines = mutableListOf<String>()
         val finalReviewLines = mutableListOf<String>()
-
-        val firstLine = lines.firstOrNull { it.isNotBlank() }?.replace("\uFEFF", "")?.replace("\u200B", "")?.trim() ?: ""
         if (firstLine.startsWith("@") || firstLine.startsWith("$")) {
             val clean = firstLine.removePrefix("@").removePrefix("$").trim()
             if (clean.contains("Title:", ignoreCase = true)) {
@@ -465,6 +1346,7 @@ class ResourceParser(
             title = firstLine.trim(' ', ':', '-', '[', ']')
         }
 
+        title = title.replace(Regex("^[#@$\\s]+"), "").replace(Regex("^(?:Title|Topic)[:\\s-]*", RegexOption.IGNORE_CASE), "").trim(' ', ':', '-', '[', ']', '"', '\'')
         if (title.isBlank()) title = "Untitled Lesson"
         val titleBn = if (hasBengaliChars(title)) title else null
 
@@ -627,7 +1509,7 @@ class ResourceParser(
             }
         }
 
-        val mdMatch = Regex("^#{2,3}\\s+(?:(\\d+|[০-৯]+)[\\.\\):/\\-–—]\\s*)?(.*)$").find(trimmed)
+        val mdMatch = Regex("^##\\s+(?:(\\d+|[০-৯]+)[\\.\\):/\\-–—]\\s*)?(.*)$").find(trimmed)
         if (mdMatch != null) {
             val numStr = mdMatch.groupValues[1]
             val num = parseBengaliOrAsciiInt(numStr) ?: expectedOrder
@@ -1259,22 +2141,97 @@ class ResourceParser(
         return html.replace(Regex("<[^>]+>"), " ").trim()
     }
 
-    private fun cleanHtmlEntities(text: String): String {
-        return text
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&rsquo;", "'")
-            .replace("&lsquo;", "'")
-            .replace("&rdquo;", "\"")
-            .replace("&ldquo;", "\"")
-            .replace("&mdash;", "—")
-            .replace("&ndash;", "–")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace(Regex("\\s+"), " ")
-            .trim()
+    fun decodeHtmlEntities(text: String, preserveXmlBrackets: Boolean = false): String {
+        if (text.isEmpty() || !text.contains('&')) return text
+
+        val sb = StringBuilder(text.length)
+        var i = 0
+        val len = text.length
+
+        while (i < len) {
+            val c = text[i]
+            if (c == '&') {
+                val semicolonIdx = text.indexOf(';', i + 1)
+                if (semicolonIdx != -1 && semicolonIdx - i <= 12) {
+                    val entity = text.substring(i + 1, semicolonIdx)
+                    var decoded: String? = null
+
+                    if (entity.startsWith("#x", ignoreCase = true)) {
+                        try {
+                            val cp = entity.substring(2).toInt(16)
+                            if (preserveXmlBrackets && (cp == 60 || cp == 62 || cp == 38)) {
+                                decoded = null
+                            } else if (Character.isValidCodePoint(cp)) {
+                                decoded = String(Character.toChars(cp))
+                            }
+                        } catch (_: Exception) {}
+                    } else if (entity.startsWith("#")) {
+                        try {
+                            val cp = entity.substring(1).toInt(10)
+                            if (preserveXmlBrackets && (cp == 60 || cp == 62 || cp == 38)) {
+                                decoded = null
+                            } else if (Character.isValidCodePoint(cp)) {
+                                decoded = String(Character.toChars(cp))
+                            }
+                        } catch (_: Exception) {}
+                    } else {
+                        val lower = entity.lowercase()
+                        if (preserveXmlBrackets && (lower == "lt" || lower == "gt" || lower == "amp")) {
+                            decoded = null
+                        } else {
+                            decoded = when (lower) {
+                                "nbsp" -> " "
+                                "amp" -> "&"
+                                "quot" -> "\""
+                                "apos" -> "'"
+                                "lt" -> "<"
+                                "gt" -> ">"
+                                "mdash" -> "—"
+                                "ndash" -> "–"
+                                "hellip" -> "…"
+                                "lsquo" -> "‘"
+                                "rsquo" -> "’"
+                                "ldquo" -> "“"
+                                "rdquo" -> "”"
+                                "bull" -> "•"
+                                "middot" -> "·"
+                                "copy" -> "©"
+                                "reg" -> "®"
+                                "trade" -> "™"
+                                "times" -> "×"
+                                "divide" -> "÷"
+                                "plusmn" -> "±"
+                                "deg" -> "°"
+                                "para" -> "¶"
+                                "sect" -> "§"
+                                "frac12" -> "½"
+                                "frac14" -> "¼"
+                                "frac34" -> "¾"
+                                else -> null
+                            }
+                        }
+                    }
+
+                    if (decoded != null) {
+                        sb.append(decoded)
+                        i = semicolonIdx + 1
+                        continue
+                    }
+                }
+            }
+            sb.append(c)
+            i++
+        }
+        val result = sb.toString()
+        return if (!preserveXmlBrackets && result.contains("&#")) {
+            decodeHtmlEntities(result, false)
+        } else {
+            result
+        }
+    }
+
+    fun cleanHtmlEntities(text: String): String {
+        return decodeHtmlEntities(text, preserveXmlBrackets = false).trim()
     }
 
     private fun isJunkContent(text: String): Boolean {
@@ -1338,7 +2295,7 @@ class ResourceParser(
         }
 
         if (bodyParagraphs.isEmpty()) {
-            return "@$title\n\n১. সারসংক্ষেপ\n[মূল বিষয়: $title]\n$trimmed"
+            return "@$title\n\n## ১. সারসংক্ষেপ\n[মূল বিষয়: $title]\n$trimmed"
         }
 
         // Identify candidate subheadings: short paragraph without terminal punctuation
@@ -1385,7 +2342,7 @@ class ResourceParser(
                 val sectionParas = bodyParagraphs.subList(pIdx + 1, nextPIdx)
                 val numStr = if (isBengali && sIdx < bengaliNums.size) bengaliNums[sIdx] else "${sIdx + 1}"
 
-                sb.append("$numStr. $subTitle\n")
+                sb.append("## $numStr. $subTitle\n")
                 if (sectionParas.isNotEmpty()) {
                     val secText = sectionParas.joinToString("\n\n")
                     val lead = extractLeadSentence(secText)
@@ -1427,7 +2384,7 @@ class ResourceParser(
                     enSectionTitles.getOrElse(cIdx) { "Section $numStr" }
                 }
 
-                sb.append("$numStr. $secTitle\n")
+                sb.append("## $numStr. $secTitle\n")
                 val chunkText = chunk.joinToString("\n\n")
                 val lead = extractLeadSentence(chunkText)
                 if (lead.isNotBlank()) {

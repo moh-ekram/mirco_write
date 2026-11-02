@@ -13,7 +13,11 @@ val PoppinsFontFamily = FontFamily(
 )
 
 val BanglaFontFamily = FontFamily(
-    Font(R.font.kalpurush, FontWeight.Normal)
+    Font(R.font.kalpurush, FontWeight.Normal),
+    Font(R.font.noto_sans_bengali, FontWeight.Normal),
+    Font(R.font.noto_sans_bengali, FontWeight.Medium),
+    Font(R.font.noto_sans_bengali, FontWeight.SemiBold),
+    Font(R.font.noto_sans_bengali, FontWeight.Bold)
 )
 
 val Typography = Typography(

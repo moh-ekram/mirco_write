@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import android.os.SystemClock
@@ -38,10 +39,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // Preferences
     val themeMode: StateFlow<String> = preferencesRepository.themeMode
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "system")
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "light")
 
     val colorPalette: StateFlow<String> = preferencesRepository.colorPalette
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "blue")
+
+    val backupFolderUri: StateFlow<String?> = preferencesRepository.backupFolderUri
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val notificationsEnabled: StateFlow<Boolean> = preferencesRepository.notificationsEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val notificationFrequencyMinutes: StateFlow<Int> = preferencesRepository.notificationFrequencyMinutes
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 60)
+
+    val notificationMode: StateFlow<String> = preferencesRepository.notificationMode
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "SERIAL")
 
     val defaultTimerMinutes: StateFlow<Int> = preferencesRepository.defaultTimerMinutes
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 5)
@@ -290,6 +303,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val _isRefreshingLesson = MutableStateFlow(false)
+    val isRefreshingLesson = _isRefreshingLesson.asStateFlow()
+
+    fun refreshLessonFromSource(lessonId: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            _isRefreshingLesson.value = true
+            try {
+                val currentLesson = lessonRepository.getLessonDirect(lessonId)
+                if (currentLesson == null) {
+                    onResult(false, "Lesson not found")
+                    return@launch
+                }
+
+                val savedUrl = preferencesRepository.savedGoogleDocsUrl.firstOrNull()
+                if (savedUrl.isNullOrBlank()) {
+                    onResult(false, "No Google Doc URL configured. Please check the Import screen.")
+                    return@launch
+                }
+
+                val (previews, error) = resourceParser.fetchAndParseGoogleDocs(savedUrl)
+                if (error != null) {
+                    onResult(false, error)
+                    return@launch
+                }
+
+                val matchedPreview = previews.firstOrNull {
+                    it.lesson.id == lessonId || it.lesson.title.equals(currentLesson.title, ignoreCase = true)
+                }
+
+                if (matchedPreview != null) {
+                    val updatedLesson = matchedPreview.lesson.copy(id = lessonId)
+                    lessonRepository.saveLesson(updatedLesson)
+                    val reloaded = lessonRepository.getLessonDirect(lessonId)
+                    _currentLesson.value = reloaded
+                    onResult(true, "Lesson updated with latest article changes ✓")
+                } else {
+                    onResult(false, "Article '${currentLesson.title}' was not found in the Google Doc.")
+                }
+            } catch (e: Exception) {
+                onResult(false, "Failed to refresh: ${e.localizedMessage}")
+            } finally {
+                _isRefreshingLesson.value = false
+            }
+        }
+    }
+
     // --- Import methods ---
 
     fun parseTextForImport(text: String) {
@@ -316,7 +375,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _importError.value = null
         viewModelScope.launch {
             try {
-                val previews = resourceParser.parseDocx(inputStream)
+                val imagesDir = File(getApplication<Application>().filesDir, "lesson_images").apply { mkdirs() }
+                val previews = resourceParser.parseDocx(inputStream, imagesDir)
                 if (previews.isEmpty()) {
                     _importError.value = "No valid lessons could be extracted from the DOCX file."
                 } else {
@@ -491,10 +551,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return lessonRepository.exportFullBackupJson()
     }
 
+    fun setBackupFolderUri(uriString: String?) {
+        viewModelScope.launch {
+            preferencesRepository.setBackupFolderUri(uriString)
+        }
+    }
+
+    fun performProgressBackup(context: Context, onResult: (Boolean, File?) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val folderUri = backupFolderUri.value
+                val file = com.example.data.backup.BackupManager.performProgressBackup(context, folderUri)
+                onResult(true, file)
+            } catch (e: Exception) {
+                onResult(false, null)
+            }
+        }
+    }
+
+    fun restoreProgressFromJson(context: Context, json: String, onResult: (Boolean, Int) -> Unit) {
+        viewModelScope.launch {
+            val res = com.example.data.backup.BackupManager.restoreProgressFromJson(context, json)
+            if (res.isSuccess) {
+                onResult(true, res.getOrNull() ?: 0)
+            } else {
+                onResult(false, 0)
+            }
+        }
+    }
+
+    fun setNotificationsEnabled(context: Context, enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setNotificationsEnabled(enabled)
+            if (enabled) {
+                val freq = notificationFrequencyMinutes.value
+                com.example.notification.NotificationScheduler.createNotificationChannel(context)
+                com.example.notification.NotificationScheduler.scheduleNextAlarm(context, freq)
+            } else {
+                com.example.notification.NotificationScheduler.cancelAlarm(context)
+            }
+        }
+    }
+
+    fun setNotificationFrequency(context: Context, minutes: Int) {
+        viewModelScope.launch {
+            preferencesRepository.setNotificationFrequencyMinutes(minutes)
+            if (notificationsEnabled.value) {
+                com.example.notification.NotificationScheduler.scheduleNextAlarm(context, minutes)
+            }
+        }
+    }
+
+    fun setNotificationMode(mode: String) {
+        viewModelScope.launch {
+            preferencesRepository.setNotificationMode(mode)
+        }
+    }
+
+    fun triggerTestNotification(context: Context) {
+        com.example.notification.NotificationScheduler.showBookmarkNotification(context, isTest = true)
+    }
+
     fun performManualBackup(context: Context, onResult: (Boolean, File?) -> Unit) {
         viewModelScope.launch {
             try {
-                val file = com.example.data.backup.BackupManager.performBackup(context, isAuto = false)
+                val file = com.example.data.backup.BackupManager.performProgressBackup(context, backupFolderUri.value)
                 onResult(true, file)
             } catch (e: Exception) {
                 onResult(false, null)
@@ -692,37 +813,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 @Export Diversification of Bangladesh: Challenges, Opportunities and the Path to a Competitive Economy
 [Central argument: Bangladesh has achieved remarkable export growth through the Ready-Made Garments industry. Diversification into pharmaceuticals, leather, light engineering, and agro-processing is imperative.]
 
-1. Introduction: Why Export Diversification Matters
+## 1. Introduction: Why Export Diversification Matters
 [Key idea: Export diversification reduces vulnerability to external shocks and supports sustainable economic growth.]
 Exports are a major source of foreign exchange and economic dynamism in developing nations.
 
-2. Sectoral Opportunities & Strategic Realignment
+## 2. Sectoral Opportunities & Strategic Realignment
 [Key sectors: Leather footwear, pharmaceuticals, IT services, light engineering.]
 Targeted incentive restructuring and trade facilitation are pivotal to catalyze private investment.
 
 @জেরেমি বেন্থাম: জীবন, চিন্তাধারা, কর্ম ও আধুনিক সমাজে তাঁর অবদান
 [এই আর্টিকেলের উদ্দেশ্য হলো জেরেমি বেন্থামের উপযোগবাদ এবং আধুনিক আইন ও বিচারব্যবস্থায় তাঁর অবদান বিশদভাবে তুলে ধরা।]
 
-১. জেরেমি বেন্থাম কে ছিলেন?
+## ১. জেরেমি বেন্থাম কে ছিলেন?
 [জেরেমি বেন্থাম ছিলেন অষ্টাদশ শতকের ব্রিটিশ দার্শনিক, আইনবিদ ও সংস্কারক।]
 তিনি উপযোগবাদ (Utilitarianism) দর্শনের প্রতিষ্ঠাতা হিসেবে সমধিক পরিচিত।
 
-২. শৈশব, শিক্ষা ও বুদ্ধিবৃত্তিক বিকাশ
+## ২. শৈশব, শিক্ষা ও বুদ্ধিবৃত্তিক বিকাশ
 [পিতা জেরেমিয়া বেন্থাম ছিলেন আইনজীবী। অল্প বয়সেই তিনি কুইন্স কলেজ, অক্সফোর্ডে ভর্তি হন।]
 আইনের প্রাচীন ও জটিল রীতিনীতির বিপরীতে তিনি যুক্তি ও কার্যকারিতার ভিত্তিতে সংস্কারের পক্ষে ছিলেন।
 
-৩. উপযোগবাদ দর্শন: সর্বাধিক মানুষের সর্বাধিক সুখ
+## ৩. উপযোগবাদ দর্শন: সর্বাধিক মানুষের সর্বাধিক সুখ
 [মূল নীতি: Greatest happiness of the greatest number]
 বেন্থামের মতে, কোনো কাজের ভালো বা মন্দ বিচার করা উচিত তা কতটুকু আনন্দ বা সুখ সৃষ্টি করে তার ওপর।
 
 @Inflationary Pressure and Monetary Policy in Bangladesh
 [Macroeconomic overview: Post-pandemic inflation dynamics, exchange rate pressures, and contractionary monetary framework in Bangladesh.]
 
-1. Drivers of Domestic Inflation
+## 1. Drivers of Domestic Inflation
 [Factors: Import cost pass-through, supply disruptions, and exchange rate depreciation.]
 Headline CPI inflation has stayed elevated due to a combination of food and non-food pressures.
 
-2. Monetary Tightening and Financial Stability
+## 2. Monetary Tightening and Financial Stability
 [Policy response: Policy repo rate hikes, market-based interest rate corridor, and liquidity absorption.]
 Contractionary policy aims to anchor inflation expectations while preserving private investment momentum.
         """.trimIndent()

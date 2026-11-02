@@ -125,7 +125,8 @@ fun ImportScreen(
     val addedLessonTitles = remember(allLessons) { allLessons.map { it.title.trim().lowercase() }.toSet() }
 
     var selectedTabIndex by remember { mutableIntStateOf(0) }
-    val tabs = listOf("File", "Google Docs", "Newspaper / পত্রিকা", "Paste Text", "AI Guidelines")
+    val tabs = listOf("Google Docs", "Other Sources")
+    var otherSubMode by remember { mutableIntStateOf(0) }
 
     val savedGoogleDocsUrl by viewModel.savedGoogleDocsUrl.collectAsState()
     var googleDocsUrl by remember { mutableStateOf("") }
@@ -173,12 +174,6 @@ fun ImportScreen(
         }
     }
 
-    LaunchedEffect(selectedTabIndex, googleDocsUrl) {
-        if (selectedTabIndex == 1 && previews.isEmpty() && !isImporting && importError == null && googleDocsUrl.isNotBlank()) {
-            viewModel.fetchGoogleDocsForImport(googleDocsUrl.replace("*", ".").trim())
-        }
-    }
-
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -207,13 +202,12 @@ fun ImportScreen(
             contentPadding = PaddingValues(top = 12.dp, bottom = 48.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Source Tabs
+            // Source Tabs (Google Docs first, Other Sources grouped)
             item {
-                ScrollableTabRow(
+                TabRow(
                     selectedTabIndex = selectedTabIndex,
                     containerColor = MaterialTheme.colorScheme.surface,
                     contentColor = MaterialTheme.colorScheme.primary,
-                    edgePadding = 0.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     tabs.forEachIndexed { index, title ->
@@ -221,74 +215,21 @@ fun ImportScreen(
                             selected = selectedTabIndex == index,
                             onClick = {
                                 selectedTabIndex = index
-                                viewModel.clearImportPreview()
                             },
-                            text = { Text(title, style = MaterialTheme.typography.labelMedium) }
+                            text = {
+                                Text(
+                                    text = title,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = if (selectedTabIndex == index) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
                         )
                     }
                 }
             }
 
-            // Tab 0: File Picker (DOCX, TXT, JSON)
+            // Tab 0: Google Docs
             if (selectedTabIndex == 0) {
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = CardSurface),
-                        shape = RoundedCornerShape(12.dp),
-                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.FileOpen,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(48.dp)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = "Select Lesson File",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "Supports Microsoft Word (.docx), Plain Text (.txt), and Topic Packs (.json).",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextMuted,
-                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Button(
-                                onClick = {
-                                    filePickerLauncher.launch(
-                                        arrayOf(
-                                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                            "text/plain",
-                                            "application/json",
-                                            "*/*"
-                                        )
-                                    )
-                                },
-                                modifier = Modifier.testTag("import_file_picker_button")
-                            ) {
-                                Icon(imageVector = Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Choose File")
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Tab 1: Google Docs URL
-            if (selectedTabIndex == 1) {
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -300,28 +241,13 @@ fun ImportScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(imageVector = Icons.Default.Link, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Text(
-                                        text = "Official Shared Google Doc",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = TextPrimary
-                                    )
-                                    Text(
-                                        text = "Fixed link • Auto-detects 3 full lessons (English & বাংলা)",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                }
+                                Text(
+                                    text = "Official Shared Google Doc",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
                             }
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = "The backend automatically searches and extracts all lessons across this shared link (Inflationary Pressure, Middle East Conflict, and বাংলা মূল্যস্ফীতি) and lists them for adding to your library.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
-                                lineHeight = 18.sp
-                            )
                             Spacer(modifier = Modifier.height(14.dp))
 
                             Button(
@@ -339,10 +265,10 @@ fun ImportScreen(
                             ) {
                                 Icon(imageVector = Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Scan & Detect All Lessons from Doc")
+                                Text("Scan & Detect Lessons")
                             }
 
-                            Spacer(modifier = Modifier.height(16.dp))
+                            Spacer(modifier = Modifier.height(14.dp))
 
                             Text(
                                 text = "Document URL:",
@@ -381,7 +307,7 @@ fun ImportScreen(
                     }
                 }
 
-                // Persistent Google Doc Lessons Catalog (Always listed, hiding Add button if already added)
+                // Persistent Google Doc Lessons Catalog
                 item {
                     val unaddedCount = docCatalog.count {
                         !addedLessonIds.contains(it.lesson.id) && !addedLessonTitles.contains(it.lesson.title.trim().lowercase())
@@ -393,25 +319,18 @@ fun ImportScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "ডক ফাইলের সব লেসন/আর্টিকেল (${docCatalog.size})",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            )
-                            Text(
-                                text = "সব লেসন সবসময় লিস্টে থাকবে • এডেড থাকলে এড বাটন দেখাবে না",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextMuted
-                            )
-                        }
+                        Text(
+                            text = "Doc Lessons (${docCatalog.size})",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
 
                         if (unaddedCount > 0) {
                             FilledTonalButton(
                                 onClick = {
                                     viewModel.importAllUnaddedDocLessons(docCatalog) { count ->
-                                        Toast.makeText(context, "$count টি নতুন লেসন লাইব্রেরিতে যোগ হয়েছে!", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "$count lessons added to library!", Toast.LENGTH_SHORT).show()
                                     }
                                 },
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
@@ -436,165 +355,334 @@ fun ImportScreen(
                         isAlreadyAdded = isAlreadyAdded,
                         onAdd = {
                             viewModel.importSingleLesson(lesson) {
-                                Toast.makeText(context, "${lesson.title} লাইব্রেরিতে যোগ করা হয়েছে!", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "${lesson.title} added to library!", Toast.LENGTH_SHORT).show()
                             }
                         }
                     )
                 }
             }
 
-            // Tab 2: Newspaper / পত্রিকা (Online Article Link or Pasted Article Text)
-            if (selectedTabIndex == 2) {
+            // Tab 1: Other Sources (Grouped: File Picker, Newspaper, Paste Text, AI Prompt)
+            if (selectedTabIndex == 1) {
                 item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = CardSurface),
-                        shape = RoundedCornerShape(12.dp),
-                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(modifier = Modifier.padding(18.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = MaterialTheme.colorScheme.primaryContainer
+                        val subModes = listOf("File Picker", "Newspaper", "Paste Text", "AI Prompt")
+                        subModes.forEachIndexed { idx, label ->
+                            FilterChip(
+                                selected = otherSubMode == idx,
+                                onClick = {
+                                    otherSubMode = idx
+                                    viewModel.clearImportPreview()
+                                },
+                                label = { Text(label) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    selectedLabelColor = MaterialTheme.colorScheme.primary
+                                )
+                            )
+                        }
+                    }
+                }
+
+                // Sub-mode 0: File Picker
+                if (otherSubMode == 0) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = CardSurface),
+                            shape = RoundedCornerShape(12.dp),
+                            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FileOpen,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(44.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = "Select Lesson File",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "Supports Word (.docx), Text (.txt), and Topic Packs (.json)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextMuted,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Button(
+                                    onClick = {
+                                        filePickerLauncher.launch(
+                                            arrayOf(
+                                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                                "text/plain",
+                                                "application/json",
+                                                "*/*"
+                                            )
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("import_file_picker_button")
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Public,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(8.dp).size(22.dp)
-                                    )
+                                    Icon(imageVector = Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Choose File")
                                 }
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column {
+                            }
+                        }
+                    }
+                }
+
+                // Sub-mode 1: Newspaper
+                if (otherSubMode == 1) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = CardSurface),
+                            shape = RoundedCornerShape(12.dp),
+                            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
+                        ) {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.primaryContainer
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Public,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(8.dp).size(20.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(12.dp))
                                     Text(
-                                        text = "Newspaper Article / সংবাদপত্রের আর্টিকেল",
+                                        text = "Newspaper Article",
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.Bold,
                                         color = TextPrimary
                                     )
-                                    Text(
-                                        text = "অনলাইন বা কপি করা আর্টিকেল স্বয়ংক্রিয়ভাবে সেকশনে ভাগ করুন",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = TextMuted
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            // Mode Switch: Link vs Paste Text
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                FilterChip(
-                                    selected = newspaperInputMode == 0,
-                                    onClick = { newspaperInputMode = 0 },
-                                    label = { Text("ওয়েব লিঙ্ক থেকে (Web Link)") },
-                                    leadingIcon = {
-                                        Icon(imageVector = Icons.Default.Link, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                        selectedLabelColor = MaterialTheme.colorScheme.primary
-                                    )
-                                )
-                                FilterChip(
-                                    selected = newspaperInputMode == 1,
-                                    onClick = { newspaperInputMode = 1 },
-                                    label = { Text("কপি করা টেক্সট (Paste Text)") },
-                                    leadingIcon = {
-                                        Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                        selectedLabelColor = MaterialTheme.colorScheme.primary
-                                    )
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.height(14.dp))
-
-                            if (newspaperInputMode == 0) {
-                                // Mode 0: Web Link
-                                Text(
-                                    text = "অনলাইন সংবাদপত্রের আর্টিকেলের লিঙ্ক দিন:",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = TextPrimary
-                                )
-                                Spacer(modifier = Modifier.height(6.dp))
-                                OutlinedTextField(
-                                    value = newspaperUrl,
-                                    onValueChange = { newspaperUrl = it },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("newspaper_url_input"),
-                                    placeholder = { Text("https://www.prothomalo.com/... বা The Daily Star...") },
-                                    singleLine = true,
-                                    shape = RoundedCornerShape(8.dp),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        unfocusedContainerColor = CardSurface,
-                                        focusedContainerColor = CardSurface
-                                    )
-                                )
-
-                                Spacer(modifier = Modifier.height(10.dp))
-
-                                // Sample URL suggestions
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .horizontalScroll(rememberScrollState()),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    OutlinedButton(
-                                        onClick = {
-                                            newspaperUrl = "https://www.thedailystar.net/opinion/views/news/inflation-and-monetary-policy-challenges-bangladesh"
-                                        },
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                    ) {
-                                        Text("Daily Star Sample Link", style = MaterialTheme.typography.labelSmall)
-                                    }
-                                    OutlinedButton(
-                                        onClick = {
-                                            newspaperUrl = "https://www.prothomalo.com/business/economics/bangladesh-export-diversification"
-                                        },
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                    ) {
-                                        Text("Prothom Alo Sample Link", style = MaterialTheme.typography.labelSmall)
-                                    }
                                 }
 
                                 Spacer(modifier = Modifier.height(14.dp))
 
-                                Button(
-                                    onClick = {
-                                        if (newspaperUrl.isNotBlank()) {
-                                            viewModel.fetchNewspaperArticleForImport(newspaperUrl.trim())
-                                        } else {
-                                            Toast.makeText(context, "অনুগ্রহ করে একটি লিঙ্ক পেস্ট করুন", Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                    modifier = Modifier.fillMaxWidth().testTag("newspaper_fetch_button"),
-                                    shape = RoundedCornerShape(8.dp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Icon(imageVector = Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Fetch & Structure Article / আর্টিকেল রূপান্তর করুন", fontWeight = FontWeight.Bold)
+                                    FilterChip(
+                                        selected = newspaperInputMode == 0,
+                                        onClick = { newspaperInputMode = 0 },
+                                        label = { Text("Web Link") },
+                                        leadingIcon = {
+                                            Icon(imageVector = Icons.Default.Link, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                            selectedLabelColor = MaterialTheme.colorScheme.primary
+                                        )
+                                    )
+                                    FilterChip(
+                                        selected = newspaperInputMode == 1,
+                                        onClick = { newspaperInputMode = 1 },
+                                        label = { Text("Paste Text") },
+                                        leadingIcon = {
+                                            Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                            selectedLabelColor = MaterialTheme.colorScheme.primary
+                                        )
+                                    )
                                 }
-                            } else {
-                                // Mode 1: Paste Newspaper Text
+
+                                Spacer(modifier = Modifier.height(14.dp))
+
+                                if (newspaperInputMode == 0) {
+                                    Text(
+                                        text = "Article URL:",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = TextPrimary
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    OutlinedTextField(
+                                        value = newspaperUrl,
+                                        onValueChange = { newspaperUrl = it },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("newspaper_url_input"),
+                                        placeholder = { Text("https://www.thedailystar.net/... or https://www.prothomalo.com/...") },
+                                        singleLine = true,
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            unfocusedContainerColor = CardSurface,
+                                            focusedContainerColor = CardSurface
+                                        )
+                                    )
+
+                                    Spacer(modifier = Modifier.height(10.dp))
+
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                newspaperUrl = "https://www.thedailystar.net/opinion/views/news/inflation-and-monetary-policy-challenges-bangladesh"
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                        ) {
+                                            Text("Daily Star Sample", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                newspaperUrl = "https://www.prothomalo.com/business/economics/bangladesh-export-diversification"
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                        ) {
+                                            Text("Prothom Alo Sample", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(14.dp))
+
+                                    Button(
+                                        onClick = {
+                                            if (newspaperUrl.isNotBlank()) {
+                                                viewModel.fetchNewspaperArticleForImport(newspaperUrl.trim())
+                                            } else {
+                                                Toast.makeText(context, "Please enter an article URL", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth().testTag("newspaper_fetch_button"),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Icon(imageVector = Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Fetch & Structure Article", fontWeight = FontWeight.Bold)
+                                    }
+                                } else {
+                                    Text(
+                                        text = "Headline and Body Text:",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = TextPrimary
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                newspaperRawText = generateSampleNewspaperArticle()
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(14.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Load Sample", style = MaterialTheme.typography.labelSmall)
+                                        }
+
+                                        Button(
+                                            onClick = {
+                                                if (newspaperRawText.isNotBlank()) {
+                                                    val structured = viewModel.autoFormatNewspaperText(newspaperRawText)
+                                                    newspaperRawText = structured
+                                                    Toast.makeText(context, "Article structured into sections", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    Toast.makeText(context, "Please paste text first", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
+                                            colors = ButtonDefaults.filledTonalButtonColors(),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(14.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Structure Sections", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(10.dp))
+
+                                    OutlinedTextField(
+                                        value = newspaperRawText,
+                                        onValueChange = { newspaperRawText = it },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(240.dp)
+                                            .testTag("newspaper_paste_input"),
+                                        placeholder = {
+                                            Text("Paste article headline and paragraphs...")
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            unfocusedContainerColor = CardSurface,
+                                            focusedContainerColor = CardSurface
+                                        )
+                                    )
+
+                                    Spacer(modifier = Modifier.height(14.dp))
+
+                                    Button(
+                                        onClick = {
+                                            if (newspaperRawText.isNotBlank()) {
+                                                viewModel.autoFormatAndParseNewspaperText(newspaperRawText)
+                                            } else {
+                                                Toast.makeText(context, "Please enter or paste text", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth().testTag("newspaper_parse_button"),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Convert & Preview", fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Sub-mode 2: Paste Text
+                if (otherSubMode == 2) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = CardSurface),
+                            shape = RoundedCornerShape(12.dp),
+                            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
                                 Text(
-                                    text = "পত্রিকার হেডলাইন ও বডি টেক্সট পেস্ট করুন:",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
+                                    text = "Paste Lesson Content",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
                                     color = TextPrimary
                                 )
-                                Spacer(modifier = Modifier.height(6.dp))
+                                Spacer(modifier = Modifier.height(10.dp))
 
-                                // Quick Actions: Load Sample, Auto-Structure
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -603,46 +691,44 @@ fun ImportScreen(
                                 ) {
                                     OutlinedButton(
                                         onClick = {
-                                            newspaperRawText = generateSampleNewspaperArticle()
+                                            rawTextContent = generateShorthandFormat()
                                         },
                                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                                     ) {
                                         Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(14.dp))
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("নমুনা আর্টিকেল লোড করুন", style = MaterialTheme.typography.labelSmall)
+                                        Text("Shorthand AI")
                                     }
 
-                                    Button(
+                                    OutlinedButton(
                                         onClick = {
-                                            if (newspaperRawText.isNotBlank()) {
-                                                val structured = viewModel.autoFormatNewspaperText(newspaperRawText)
-                                                newspaperRawText = structured
-                                                Toast.makeText(context, "আর্টিকেল সফলভাবে ১., ২. সেকশন ও গাইডলাইনে বিন্যস্ত হয়েছে!", Toast.LENGTH_SHORT).show()
-                                            } else {
-                                                Toast.makeText(context, "আগে টেক্সট পেস্ট করুন", Toast.LENGTH_SHORT).show()
-                                            }
+                                            rawTextContent = generateSampleFocusWriting()
                                         },
-                                        colors = ButtonDefaults.filledTonalButtonColors(),
                                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                                     ) {
-                                        Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(14.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("সেকশনে সাজান (১., ২. ও [...])", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                        Text("Focus Writing")
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            rawTextContent = generateSampleArgumentative()
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                    ) {
+                                        Text("Argumentative")
                                     }
                                 }
 
-                                Spacer(modifier = Modifier.height(10.dp))
+                                Spacer(modifier = Modifier.height(12.dp))
 
                                 OutlinedTextField(
-                                    value = newspaperRawText,
-                                    onValueChange = { newspaperRawText = it },
+                                    value = rawTextContent,
+                                    onValueChange = { rawTextContent = it },
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(240.dp)
-                                        .testTag("newspaper_paste_input"),
-                                    placeholder = {
-                                        Text("শিরোনাম ও সম্পূর্ণ লেখার প্যারাগ্রাফ পেস্ট করুন...\nঅ্যাপ স্বয়ংক্রিয়ভাবে সাব-হেডিং ডিটেক্ট করে ১., ২., ৩. সেকশন এবং [...] গাইডলাইন তৈরি করবে।")
-                                    },
+                                        .height(220.dp)
+                                        .testTag("paste_text_input"),
+                                    placeholder = { Text("Paste shorthand format or marker format content...") },
                                     shape = RoundedCornerShape(8.dp),
                                     colors = OutlinedTextFieldDefaults.colors(
                                         unfocusedContainerColor = CardSurface,
@@ -650,194 +736,55 @@ fun ImportScreen(
                                     )
                                 )
 
-                                Spacer(modifier = Modifier.height(14.dp))
+                                Spacer(modifier = Modifier.height(12.dp))
 
                                 Button(
                                     onClick = {
-                                        if (newspaperRawText.isNotBlank()) {
-                                            viewModel.autoFormatAndParseNewspaperText(newspaperRawText)
-                                        } else {
-                                            Toast.makeText(context, "অনুগ্রহ করে টেক্সট লিখুন বা পেস্ট করুন", Toast.LENGTH_SHORT).show()
+                                        if (rawTextContent.isNotBlank()) {
+                                            viewModel.parseTextForImport(rawTextContent)
                                         }
                                     },
-                                    modifier = Modifier.fillMaxWidth().testTag("newspaper_parse_button"),
-                                    shape = RoundedCornerShape(8.dp)
+                                    enabled = rawTextContent.isNotBlank() && !isImporting,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("inspect_pasted_text_button")
                                 ) {
-                                    Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Convert & Preview Lesson / লেসন তৈরি করুন", fontWeight = FontWeight.Bold)
+                                    Text("Inspect Content")
                                 }
                             }
+                        }
+                    }
+                }
 
-                            Spacer(modifier = Modifier.height(14.dp))
-
-                            // Informative Tip Card
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = SoftBlueContainer.copy(alpha = 0.5f),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalAlignment = Alignment.Top
-                                ) {
+                // Sub-mode 3: AI Prompt Generator
+                if (otherSubMode == 3) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = CardSurface),
+                            shape = RoundedCornerShape(12.dp),
+                            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
-                                        imageVector = Icons.Default.Lightbulb,
+                                        imageVector = Icons.Default.AutoAwesome,
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(18.dp).padding(top = 1.dp)
+                                        modifier = Modifier.size(20.dp)
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "টিপস: বড় আর্টিকেলে সাব-হেডিংগুলোর আগে সাধারণ নম্বর (যেমন: ১. সাব-হেডিং বা 1. Sub-heading) এবং প্রয়োজনবোধে পয়েন্টগুলো [...] এ রাখলে অ্যাপটি সরাসরি সেগুলোকে সেকশন ও গাইডলাইনে ভাগ করে সুন্দরভাবে উপস্থাপন করে।",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        text = "AI Lesson Format",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
                                     )
                                 }
-                            }
-                        }
-                    }
-                }
-            }
 
-            // Tab 3: Direct Text Paste with Flexible Preset Selectors
-            if (selectedTabIndex == 3) {
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = CardSurface),
-                        shape = RoundedCornerShape(12.dp),
-                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = "Paste Lesson Resource Content",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Paste shorthand AI text, standard Version 2 markers, or JSON topic packs below:",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextMuted
-                            )
+                                Spacer(modifier = Modifier.height(10.dp))
 
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            // Quick Templates Row
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = {
-                                        rawTextContent = generateShorthandFormat()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                ) {
-                                    Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Shorthand AI Format (Minimal)")
-                                }
-
-                                OutlinedButton(
-                                    onClick = {
-                                        rawTextContent = generateSampleFocusWriting()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                ) {
-                                    Text("Focus Writing (V2)")
-                                }
-
-                                OutlinedButton(
-                                    onClick = {
-                                        rawTextContent = generateSampleArgumentative()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                ) {
-                                    Text("Argumentative (V2)")
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            OutlinedTextField(
-                                value = rawTextContent,
-                                onValueChange = { rawTextContent = it },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(220.dp)
-                                    .testTag("paste_text_input"),
-                                placeholder = { Text("Paste shorthand format (@Type: Title:, Section1: Title, Guide:, Answer:) or Marker Format V2...") },
-                                shape = RoundedCornerShape(8.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    unfocusedContainerColor = CardSurface,
-                                    focusedContainerColor = CardSurface
-                                )
-                            )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Button(
-                                onClick = {
-                                    if (rawTextContent.isNotBlank()) {
-                                        viewModel.parseTextForImport(rawTextContent)
-                                    }
-                                },
-                                enabled = rawTextContent.isNotBlank() && !isImporting,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("inspect_pasted_text_button")
-                            ) {
-                                Text("Inspect & Preview Content")
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Tab 4: Interactive AI Guidelines & Prompt Generator
-            if (selectedTabIndex == 4) {
-                // Primary Shorthand Guidelines Card
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = CardSurface),
-                        shape = RoundedCornerShape(12.dp),
-                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.AutoAwesome,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "সহজ এআই লেসন গাইডলাইন (Shorthand Format)",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "অতিরিক্ত কোন সেকশন ট্যাগ বা START/END ছাড়া সরাসরি নিচের সহজ প্যাটার্নে যেকোনো AI মডেল (ChatGPT, Gemini, Claude) কে দিয়ে সম্পূর্ণ লেসন লেখাতে পারেন। অ্যাপ স্বয়ংক্রিয়ভাবে এটি ডিটেক্ট করবে:",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
-                                lineHeight = 19.sp
-                            )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            // Exact User Format Pattern Display
-                            val sampleShorthandPattern = """
+                                val sampleShorthandPattern = """
 @Type: Title: 
 -Description:
 -Guidelines:
@@ -851,201 +798,150 @@ Title
 Guide:
 Answer:
 ...
-...
-...
 SectionN: 
 Title 
 Guide:
 Answer:
-                            """.trimIndent()
+                                """.trimIndent()
 
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    .border(1.dp, SubtleBorder, RoundedCornerShape(8.dp))
-                                    .padding(12.dp)
-                            ) {
-                                Text(
-                                    text = sampleShorthandPattern,
-                                    style = MaterialTheme.typography.bodyMedium.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 12.sp),
-                                    color = AcademicNavy,
-                                    lineHeight = 18.sp
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.height(14.dp))
-
-                            // Key Guidelines Rules Breakdown in Bangla & English
-                            Text(
-                                text = "গাইডলাইনের মূল নিয়মাবলী:",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            val rules = listOf(
-                                "১. লেসন শিরোনাম: @Type: Title: বা \$Type, @Title: দিয়ে শুরু হবে (যেমন: @Focus Writing: বাংলাদেশের মূল্যস্ফীতি অথবা \$Focus Writing, @Title: Inflation)",
-                                "২. সারসংক্ষেপ ও গাইডলাইন: -Description: এ সংক্ষিপ্ত বর্ণনা এবং -Guidelines: এর পর মূল পয়েন্ট ও নির্দেশনাবলী",
-                                "৩. সেকশন ফরম্যাট: Section1: Title অথবা এক লাইনে Section2: এবং পরের লাইনে Title—দুটোই সরাসরি কাজ করে",
-                                "৪. গাইড ও উত্তর: Guide: এর পর লেখার নির্দেশনা ও পয়েন্ট এবং Answer: এর পর মডেল উত্তর",
-                                "৫. উত্তর গণনা: Answer: এর পর থেকে পরবর্তী SectionN: পর্যন্ত পুরো অংশটি সেই সেকশনের মডেল উত্তর হিসেবে কাউন্ট হবে",
-                                "৬. কোনো START/END দরকার নেই: অতিরিক্ত কোনো সেকশন ট্যাগ বা সমাপ্তি ট্যাগের দরকার নেই; পরবর্তী SectionN: এলেই আগের সেকশন অটো-ক্লোজ হবে",
-                                "৭. কার্ড টাইটেল: অ্যাপ সেকশনের কার্ডগুলোতে শুধু টাইটেল যুক্ত করবে, কোনোভাবেই Section1, Section2 লেখা থাকবে না",
-                                "৮. রাইটিং এরিয়া লুকানো: প্রতি সেকশনে Writing Area প্রাথমিক অবস্থায় বন্ধ থাকবে এবং 'Show Answer' এর পাশে 'Writing Area' বাটনে ক্লিক করে অন করা যাবে",
-                                "৯. শব্দার্থ (Vocabulary): গাইডের ভেতরে '- Term -> বাংলা অর্থ' লিখলেই অ্যাপ স্বয়ংক্রিয়ভাবে শব্দার্থ তালিকায় অন্তর্ভুক্ত করবে"
-                            )
-
-                            rules.forEach { rule ->
-                                Row(modifier = Modifier.padding(vertical = 3.dp), verticalAlignment = Alignment.Top) {
-                                    Icon(
-                                        imageVector = Icons.Default.CheckCircle,
-                                        contentDescription = null,
-                                        tint = SuccessGreen,
-                                        modifier = Modifier.size(16.dp).padding(top = 2.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .border(1.dp, SubtleBorder, RoundedCornerShape(8.dp))
+                                        .padding(12.dp)
+                                ) {
                                     Text(
-                                        text = rule,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = TextSecondary,
+                                        text = sampleShorthandPattern,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 12.sp),
+                                        color = AcademicNavy,
                                         lineHeight = 18.sp
                                     )
                                 }
-                            }
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                                Spacer(modifier = Modifier.height(14.dp))
 
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Button(
-                                    onClick = {
-                                        ExportManager.copyToClipboard(context, sampleShorthandPattern, "MicroWrite Shorthand Template")
-                                        Toast.makeText(context, "Shorthand template copied to clipboard!", Toast.LENGTH_SHORT).show()
-                                    },
-                                    modifier = Modifier.weight(1f)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Copy Template")
-                                }
-
-                                OutlinedButton(
-                                    onClick = {
-                                        selectedTabIndex = 2
-                                        rawTextContent = generateShorthandFormat()
+                                    Button(
+                                        onClick = {
+                                            ExportManager.copyToClipboard(context, sampleShorthandPattern, "MicroWrite Shorthand Template")
+                                            Toast.makeText(context, "Template copied to clipboard", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Copy Template")
                                     }
-                                ) {
-                                    Text("Load into Paste")
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            otherSubMode = 2
+                                            rawTextContent = generateShorthandFormat()
+                                        }
+                                    ) {
+                                        Text("Load into Paste")
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // AI Prompt Builder Card
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = CardSurface),
-                        shape = RoundedCornerShape(12.dp),
-                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(imageVector = Icons.Default.Lightbulb, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                Spacer(modifier = Modifier.width(8.dp))
+                    // AI Prompt Generator
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = CardSurface),
+                            shape = RoundedCornerShape(12.dp),
+                            border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(SubtleBorder))
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(imageVector = Icons.Default.Lightbulb, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "AI Master Prompt Generator",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(10.dp))
+
                                 Text(
-                                    text = "AI Master Prompt Generator",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
+                                    text = "Lesson Topic:",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextPrimary
                                 )
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "যেকোনো বিষয়ে এআইকে দিয়ে এই ফরম্যাটে সম্পূর্ণ লেসন প্রস্তুত করতে নিচের প্রম্পটটি কপি করে ChatGPT বা Gemini তে পেস্ট করুন:",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextMuted
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            // Topic Input
-                            Text(
-                                text = "Lesson Topic:",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            OutlinedTextField(
-                                value = aiTopicInput,
-                                onValueChange = { aiTopicInput = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true,
-                                shape = RoundedCornerShape(8.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    unfocusedContainerColor = CardSurface,
-                                    focusedContainerColor = CardSurface
+                                Spacer(modifier = Modifier.height(4.dp))
+                                OutlinedTextField(
+                                    value = aiTopicInput,
+                                    onValueChange = { aiTopicInput = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        unfocusedContainerColor = CardSurface,
+                                        focusedContainerColor = CardSurface
+                                    )
                                 )
-                            )
 
-                            Spacer(modifier = Modifier.height(12.dp))
+                                Spacer(modifier = Modifier.height(12.dp))
 
-                            val masterPrompt = buildAiMasterPrompt(
-                                topic = aiTopicInput.ifBlank { "Economic Diversification" },
-                                type = aiWritingType,
-                                sectionCount = aiSectionCount
-                            )
-
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    .border(1.dp, SubtleBorder, RoundedCornerShape(8.dp))
-                                    .padding(12.dp)
-                            ) {
-                                Text(
-                                    text = masterPrompt,
-                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                                    color = TextSecondary,
-                                    lineHeight = 16.sp
+                                val masterPrompt = buildAiMasterPrompt(
+                                    topic = aiTopicInput.ifBlank { "Economic Diversification" },
+                                    type = aiWritingType,
+                                    sectionCount = aiSectionCount
                                 )
-                            }
 
-                            Spacer(modifier = Modifier.height(12.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .border(1.dp, SubtleBorder, RoundedCornerShape(8.dp))
+                                        .padding(12.dp)
+                                ) {
+                                    Text(
+                                        text = masterPrompt,
+                                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                                        color = TextSecondary,
+                                        lineHeight = 16.sp
+                                    )
+                                }
 
-                            Button(
-                                onClick = {
-                                    ExportManager.copyToClipboard(context, masterPrompt, "MicroWrite AI Prompt")
-                                    Toast.makeText(context, "AI Master Prompt copied to clipboard! Paste it into your AI model.", Toast.LENGTH_LONG).show()
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Copy AI Master Prompt")
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Button(
+                                    onClick = {
+                                        ExportManager.copyToClipboard(context, masterPrompt, "MicroWrite AI Prompt")
+                                        Toast.makeText(context, "AI Master Prompt copied to clipboard", Toast.LENGTH_SHORT).show()
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Copy AI Master Prompt")
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // Loading Indicator
+            // Non-blocking loading indicator keeping the screen always loaded and usable
             if (isImporting) {
                 item {
-                    Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator()
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text("Inspecting and validating resource...", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
-                        }
-                    }
+                    androidx.compose.material3.LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(4.dp))
+                    )
                 }
             }
 
@@ -1070,8 +966,8 @@ Answer:
                 }
             }
 
-            // IMPORT PREVIEWS SECTION (For File, Newspaper, Paste Text, AI Guidelines)
-            if (previews.isNotEmpty() && selectedTabIndex != 1) {
+            // IMPORT PREVIEWS SECTION (For Other Sources: File, Newspaper, Paste Text)
+            if (previews.isNotEmpty() && selectedTabIndex == 1) {
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),

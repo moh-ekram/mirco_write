@@ -119,7 +119,7 @@ fun BookmarksScreen(
                         onClick = {
                             val combined = bookmarkedLines.joinToString("\n\n") { "• ${it.lineText} (${it.sectionTitle})" }
                             ExportManager.copyToClipboard(context, combined, "Selected Lines")
-                            Toast.makeText(context, "সবগুলো লাইন কপি করা হয়েছে!", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "All lines copied to clipboard", Toast.LENGTH_SHORT).show()
                         },
                         modifier = Modifier.testTag("copy_all_lines_button")
                     ) {
@@ -201,11 +201,11 @@ fun BookmarksScreen(
                                 line = line,
                                 onCopy = {
                                     ExportManager.copyToClipboard(context, line.lineText, "Bookmarked Line")
-                                    Toast.makeText(context, "লাইনটি কপি করা হয়েছে", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "Line copied", Toast.LENGTH_SHORT).show()
                                 },
                                 onRemove = {
                                     viewModel.removeBookmarkedLine(line.id)
-                                    Toast.makeText(context, "বুকমার্ক থেকে সরানো হয়েছে", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "Removed from bookmarks", Toast.LENGTH_SHORT).show()
                                 },
                                 onNavigateToSection = {
                                     onNavigateToSection(line.lessonId, line.sectionId)
@@ -264,22 +264,22 @@ fun BookmarksScreen(
     if (showClearDialog) {
         AlertDialog(
             onDismissRequest = { showClearDialog = false },
-            title = { Text("সবগুলো সিলেক্ট করা লাইন মুছবেন?") },
-            text = { Text("এই তালিকার সব বুকমার্ক করা লাইন মুছে ফেলা হবে। আপনি কি নিশ্চিত?") },
+            title = { Text("Clear all bookmarked lines?") },
+            text = { Text("This will remove all selected lines from your bookmarks.") },
             confirmButton = {
                 TextButton(
                     onClick = {
                         viewModel.clearAllBookmarkedLines()
                         showClearDialog = false
-                        Toast.makeText(context, "সকল সংরক্ষিত লাইন মুছে ফেলা হয়েছে", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "All lines cleared", Toast.LENGTH_SHORT).show()
                     }
                 ) {
-                    Text("মুছে ফেলুন", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                    Text("Clear", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showClearDialog = false }) {
-                    Text("বাতিল")
+                    Text("Cancel")
                 }
             }
         )
@@ -463,7 +463,7 @@ fun EmptySelectedLinesView() {
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "যেকোনো উত্তরের (Ans.) পপ-আপে গিয়ার আইকন চাপুন। এরপর 'Select lines separately' অন করে উত্তরের যেকোনো লাইনে স্পর্শ করলেই সেই লাইনটি এখানে আলাদাভাবে জমা হবে।",
+                    text = "Enable 'Select lines separately' in answer settings and tap any line to save it here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = extColors.textMuted,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center

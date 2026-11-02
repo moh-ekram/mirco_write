@@ -21,10 +21,12 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.outlined.PlayCircleOutline
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -50,12 +52,17 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.MainViewModel
 import com.example.ui.screens.bookmarks.BookmarksScreen
 import com.example.ui.screens.home.HomeScreen
 import com.example.ui.screens.import_screen.ImportScreen
 import com.example.ui.screens.lesson_detail.LessonDetailScreen
 import com.example.ui.screens.library.LibraryScreen
+import com.example.ui.screens.reels.ReelsScreen
+import com.example.ui.screens.reels.ReelsViewModel
 import com.example.ui.screens.review.FinalReviewScreen
 import com.example.ui.screens.settings.SettingsScreen
 import com.example.ui.screens.study.SectionStudyScreen
@@ -69,17 +76,13 @@ data class BottomNavItem(
     val testTag: String
 )
 
-val bottomNavLeftItems = listOf(
+val allBottomNavItems = listOf(
     BottomNavItem(Screen.Home.route, "Home", Icons.Filled.Home, Icons.Outlined.Home, "nav_home"),
-    BottomNavItem(Screen.Library.route, "Library", Icons.Filled.MenuBook, Icons.Outlined.MenuBook, "nav_library")
-)
-
-val bottomNavRightItems = listOf(
+    BottomNavItem(Screen.Library.route, "Library", Icons.Filled.MenuBook, Icons.Outlined.MenuBook, "nav_library"),
+    BottomNavItem(Screen.Reels.route, "Reels", Icons.Filled.PlayCircle, Icons.Outlined.PlayCircleOutline, "nav_reels"),
     BottomNavItem(Screen.Bookmarks.route, "Bookmarks", Icons.Filled.Bookmark, Icons.Outlined.BookmarkBorder, "nav_bookmarks"),
     BottomNavItem(Screen.Settings.route, "Settings", Icons.Filled.Settings, Icons.Outlined.Settings, "nav_settings")
 )
-
-val allBottomNavItems = bottomNavLeftItems + bottomNavRightItems
 
 @Composable
 fun AppNavHost(
@@ -90,13 +93,23 @@ fun AppNavHost(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
-    // Show floating pill bottom bar on the 4 top-level screens
+    val reelsViewModel: ReelsViewModel = viewModel()
+    val isReelsFullscreen by reelsViewModel.isFullscreen.collectAsState()
+    val allLessons by viewModel.allLessons.collectAsState()
+
+    LaunchedEffect(allLessons) {
+        reelsViewModel.addLessonsToAvailableDocs(allLessons)
+    }
+
+    val isReelsRoute = currentRoute == Screen.Reels.route
+    // Show floating pill bottom bar on top-level screens, but hide in Reels Fullscreen mode
     val isTopLevelDestination = allBottomNavItems.any { it.route == currentRoute }
+    val showBottomBar = isTopLevelDestination && (!isReelsRoute || !isReelsFullscreen)
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
         bottomBar = {
-            if (isTopLevelDestination) {
+            if (showBottomBar) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -115,52 +128,11 @@ fun AppNavHost(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(64.dp)
-                                .padding(horizontal = 12.dp),
+                                .padding(horizontal = 8.dp),
                             horizontalArrangement = Arrangement.SpaceAround,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Left 2 items: Home & Library
-                            bottomNavLeftItems.forEach { item ->
-                                val selected = currentRoute == item.route
-                                FloatingNavItem(
-                                    item = item,
-                                    selected = selected,
-                                    onClick = {
-                                        if (currentRoute != item.route) {
-                                            navController.navigate(item.route) {
-                                                popUpTo(navController.graph.findStartDestination().id) {
-                                                    saveState = true
-                                                }
-                                                launchSingleTop = true
-                                                restoreState = true
-                                            }
-                                        }
-                                    }
-                                )
-                            }
-
-                            // Center Round Elevated Floating Button (Import)
-                            Box(
-                                modifier = Modifier
-                                    .size(46.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primary)
-                                    .testTag("nav_import")
-                                    .clickable {
-                                        navController.navigate(Screen.Import.route)
-                                    },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Add,
-                                    contentDescription = "Import Lesson",
-                                    tint = MaterialTheme.colorScheme.onPrimary,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-
-                            // Right 2 items: Bookmarks & Settings
-                            bottomNavRightItems.forEach { item ->
+                            allBottomNavItems.forEach { item ->
                                 val selected = currentRoute == item.route
                                 FloatingNavItem(
                                     item = item,
@@ -187,7 +159,7 @@ fun AppNavHost(
         NavHost(
             navController = navController,
             startDestination = Screen.Home.route,
-            modifier = Modifier.padding(innerPadding)
+            modifier = if (isReelsRoute && isReelsFullscreen) Modifier else Modifier.padding(innerPadding)
         ) {
             // Home Destination
             composable(Screen.Home.route) {
@@ -224,6 +196,11 @@ fun AppNavHost(
                         navController.navigate(Screen.Import.route)
                     }
                 )
+            }
+
+            // Reels Destination
+            composable(Screen.Reels.route) {
+                ReelsScreen(viewModel = reelsViewModel)
             }
 
             // Bookmarks Destination

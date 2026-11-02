@@ -37,6 +37,11 @@ class PreferencesRepository(private val context: Context) {
         val ANSWER_FONT_SIZE = floatPreferencesKey("answer_font_size")
         val ANSWER_LINE_SELECTION_MODE = booleanPreferencesKey("answer_line_selection_mode")
         val BOOKMARKED_LINES_JSON = stringPreferencesKey("bookmarked_lines_json")
+        val BACKUP_FOLDER_URI = stringPreferencesKey("backup_folder_uri")
+        val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
+        val NOTIFICATION_FREQUENCY_MINUTES = intPreferencesKey("notification_frequency_minutes")
+        val NOTIFICATION_MODE = stringPreferencesKey("notification_mode") // "SERIAL", "RANDOM"
+        val NOTIFICATION_LAST_INDEX = intPreferencesKey("notification_last_index")
     }
 
     private val moshi = Moshi.Builder()
@@ -69,8 +74,28 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
+    val backupFolderUri: Flow<String?> = context.dataStore.data.map { prefs ->
+        prefs[Keys.BACKUP_FOLDER_URI]
+    }
+
+    val notificationsEnabled: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.NOTIFICATIONS_ENABLED] ?: false
+    }
+
+    val notificationFrequencyMinutes: Flow<Int> = context.dataStore.data.map { prefs ->
+        prefs[Keys.NOTIFICATION_FREQUENCY_MINUTES] ?: 60
+    }
+
+    val notificationMode: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[Keys.NOTIFICATION_MODE] ?: "SERIAL"
+    }
+
+    val notificationLastIndex: Flow<Int> = context.dataStore.data.map { prefs ->
+        prefs[Keys.NOTIFICATION_LAST_INDEX] ?: 0
+    }
+
     val themeMode: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[Keys.THEME_MODE] ?: "system"
+        prefs[Keys.THEME_MODE] ?: "light"
     }
 
     val colorPalette: Flow<String> = context.dataStore.data.map { prefs ->
@@ -242,6 +267,40 @@ class PreferencesRepository(private val context: Context) {
     suspend fun clearAllBookmarkedLines() {
         context.dataStore.edit { prefs ->
             prefs[Keys.BOOKMARKED_LINES_JSON] = "[]"
+        }
+    }
+
+    suspend fun setBackupFolderUri(uriString: String?) {
+        context.dataStore.edit { prefs ->
+            if (uriString != null) {
+                prefs[Keys.BACKUP_FOLDER_URI] = uriString
+            } else {
+                prefs.remove(Keys.BACKUP_FOLDER_URI)
+            }
+        }
+    }
+
+    suspend fun setNotificationsEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.NOTIFICATIONS_ENABLED] = enabled
+        }
+    }
+
+    suspend fun setNotificationFrequencyMinutes(minutes: Int) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.NOTIFICATION_FREQUENCY_MINUTES] = minutes
+        }
+    }
+
+    suspend fun setNotificationMode(mode: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.NOTIFICATION_MODE] = mode
+        }
+    }
+
+    suspend fun setNotificationLastIndex(index: Int) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.NOTIFICATION_LAST_INDEX] = index
         }
     }
 

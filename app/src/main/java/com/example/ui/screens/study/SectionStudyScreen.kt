@@ -38,10 +38,36 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.BookmarkRemove
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.layout.ContentScale
+import com.example.data.model.BookmarkedLine
+import com.example.ui.components.splitContentIntoRichBlocks
+import com.example.ui.components.RichBlock
+import com.example.ui.components.LatexBlockView
+import com.example.ui.components.ImageZoomDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -129,7 +155,10 @@ fun SectionStudyScreen(
 
     var showModelAnswer by remember(sectionId) { mutableStateOf(false) }
     var showWritingArea by remember(sectionId) { mutableStateOf(false) }
-    var showAnswerSettings by remember { mutableStateOf(false) }
+    var showAnswerSettingsMenu by remember { mutableStateOf(false) }
+    var showTimerPopup by remember { mutableStateOf(false) }
+    var showSectionListPopup by remember { mutableStateOf(false) }
+    var selectedLineForBookmark by remember { mutableStateOf<String?>(null) }
 
     val currentLesson = lesson
     val currentSection = section
@@ -148,6 +177,10 @@ fun SectionStudyScreen(
 
     // Determine timer seconds: section timer if > 0, else settings default minutes
     val timerDurationSeconds = if (currentSection.timerSeconds > 0) currentSection.timerSeconds else defaultTimerMinutes * 60
+
+    LaunchedEffect(timerDurationSeconds) {
+        viewModel.initTimer(timerDurationSeconds)
+    }
 
     // Local draft state with debounced auto-saving
     var draftText by remember(currentSection.id) { mutableStateOf(currentSection.userDraft) }
@@ -193,14 +226,14 @@ fun SectionStudyScreen(
                     title = {
                         Column {
                             BanglaAwareText(
-                                text = currentSection.title.cleanDisplayTitle(),
+                                text = currentLesson.title,
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "${currentLesson.title} (${currentSection.order}/${sections.size})",
+                                text = "Section ${currentSection.order} of ${sections.size}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = extColors.textMuted,
                                 maxLines = 1,
@@ -225,42 +258,6 @@ fun SectionStudyScreen(
                         }
                     },
                     actions = {
-                        // Skip for later action button
-                        IconButton(
-                            onClick = {
-                                if (focusLockEnabled && timerIsRunning) {
-                                    Toast.makeText(context, "Focus Lock is active. Finish or pause timer to skip.", Toast.LENGTH_SHORT).show()
-                                    return@IconButton
-                                }
-                                viewModel.recordSectionAction(currentSection.id, currentSection.isCompleted, currentSection.isSkipped)
-                                viewModel.markSectionSkipped(currentSection.id)
-
-                                coroutineScope.launch {
-                                    val result = snackbarHostState.showSnackbar(
-                                        message = "Section skipped",
-                                        actionLabel = "Undo",
-                                        duration = SnackbarDuration.Short
-                                    )
-                                    if (result == SnackbarResult.ActionPerformed) {
-                                        viewModel.undoLastSectionAction()
-                                    }
-                                }
-
-                                if (nextSection != null) {
-                                    onNavigateToSection(lessonId, nextSection.id)
-                                } else {
-                                    onNavigateToReview(lessonId)
-                                }
-                            },
-                            modifier = Modifier.testTag("study_skip_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.FastForward,
-                                contentDescription = "Skip for later",
-                                tint = extColors.warning
-                            )
-                        }
-
                         // Bookmark toggle
                         IconButton(
                             onClick = { viewModel.toggleSectionBookmark(currentSection.id) },
@@ -289,10 +286,10 @@ fun SectionStudyScreen(
             }
         },
         bottomBar = {
-            // Minimal Iconized Grid Bar: Prev, Write, Ans., Next in a single line
+            // Minimal Clean Grid Bar: timer, list, ans, prev, skip, next
             Surface(
                 color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 10.dp,
+                shadowElevation = 8.dp,
                 tonalElevation = 2.dp,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -301,11 +298,128 @@ fun SectionStudyScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 1. Prev Grid Box
+                    // 1. Timer Button (Displays countdown when running, occupies no other screen space)
+                    val remainingSeconds by viewModel.timerRemainingSeconds.collectAsState()
+                    val timerMinutes = remainingSeconds / 60
+                    val timerSecs = remainingSeconds % 60
+                    val timerCountdown = String.format("%02d:%02d", timerMinutes, timerSecs)
+
+                    Surface(
+                        onClick = { showTimerPopup = true },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (timerIsRunning) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (timerIsRunning) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                                    else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(54.dp)
+                            .testTag("study_timer_button")
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Timer,
+                                contentDescription = "Timer",
+                                tint = if (timerIsRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (timerIsRunning) timerCountdown else "Timer",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                fontWeight = if (timerIsRunning) FontWeight.Bold else FontWeight.SemiBold,
+                                color = if (timerIsRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                        }
+                    }
+
+                    // 2. Section List Button
+                    Surface(
+                        onClick = { showSectionListPopup = true },
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(54.dp)
+                            .testTag("study_section_list_button")
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FormatListNumbered,
+                                contentDescription = "Section List",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "List",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                        }
+                    }
+
+                    // 3. Ans. Button
+                    Surface(
+                        onClick = { showModelAnswer = true },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (showModelAnswer) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (showModelAnswer) MaterialTheme.colorScheme.secondary.copy(alpha = 0.6f)
+                                    else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(54.dp)
+                            .testTag("toggle_model_answer_button")
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Visibility,
+                                contentDescription = "Answer",
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Ans",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.secondary,
+                                maxLines = 1
+                            )
+                        }
+                    }
+
+                    // 4. Prev Button
                     Surface(
                         onClick = {
                             if (prevSection != null) {
@@ -316,17 +430,17 @@ fun SectionStudyScreen(
                             }
                         },
                         enabled = prevSection != null,
-                        shape = RoundedCornerShape(16.dp),
-                        color = if (prevSection != null) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (prevSection != null) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
                                 else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
                         border = BorderStroke(
                             width = 1.dp,
-                            color = if (prevSection != null) MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
-                                    else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f)
+                            color = if (prevSection != null) MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                                    else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
                         ),
                         modifier = Modifier
                             .weight(1f)
-                            .height(58.dp)
+                            .height(54.dp)
                             .testTag("study_prev_button")
                     ) {
                         Column(
@@ -339,82 +453,57 @@ fun SectionStudyScreen(
                                 contentDescription = "Prev",
                                 tint = if (prevSection != null) MaterialTheme.colorScheme.onSurface
                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.height(3.dp))
+                            Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = "Prev",
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
                                 fontWeight = FontWeight.SemiBold,
                                 color = if (prevSection != null) MaterialTheme.colorScheme.onSurface
-                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+                                maxLines = 1
                             )
                         }
                     }
 
-                    // 2. Write Grid Box (Opens bottom popup for writing)
+                    // 5. Skip Button
                     Surface(
                         onClick = {
-                            showModelAnswer = false
-                            showWritingArea = true
-                        },
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
-                        border = BorderStroke(
-                            width = 1.dp,
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(58.dp)
-                            .testTag("study_toggle_writing_button")
-                    ) {
-                        Column(
-                            modifier = Modifier.fillMaxSize(),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Box(contentAlignment = Alignment.TopEnd) {
-                                Icon(
-                                    imageVector = Icons.Default.Edit,
-                                    contentDescription = "Write",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(20.dp)
+                            if (focusLockEnabled && timerIsRunning) {
+                                Toast.makeText(context, "Focus Lock is active. Finish or pause timer to skip.", Toast.LENGTH_SHORT).show()
+                                return@Surface
+                            }
+                            viewModel.recordSectionAction(currentSection.id, currentSection.isCompleted, currentSection.isSkipped)
+                            viewModel.markSectionSkipped(currentSection.id)
+
+                            coroutineScope.launch {
+                                val result = snackbarHostState.showSnackbar(
+                                    message = "Section skipped",
+                                    actionLabel = "Undo",
+                                    duration = SnackbarDuration.Short
                                 )
-                                if (draftText.isNotBlank()) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(6.dp)
-                                            .background(MaterialTheme.colorScheme.primary, CircleShape)
-                                    )
+                                if (result == SnackbarResult.ActionPerformed) {
+                                    viewModel.undoLastSectionAction()
                                 }
                             }
-                            Spacer(modifier = Modifier.height(3.dp))
-                            Text(
-                                text = "Write",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
 
-                    // 3. Ans. Grid Box (Opens bottom popup for model answer)
-                    Surface(
-                        onClick = {
-                            showWritingArea = false
-                            showModelAnswer = true
+                            if (nextSection != null) {
+                                onNavigateToSection(lessonId, nextSection.id)
+                            } else {
+                                onNavigateToReview(lessonId)
+                            }
                         },
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                         border = BorderStroke(
                             width = 1.dp,
-                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.35f)
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
                         ),
                         modifier = Modifier
                             .weight(1f)
-                            .height(58.dp)
-                            .testTag("toggle_model_answer_button")
+                            .height(54.dp)
+                            .testTag("study_skip_button")
                     ) {
                         Column(
                             modifier = Modifier.fillMaxSize(),
@@ -422,22 +511,23 @@ fun SectionStudyScreen(
                             verticalArrangement = Arrangement.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Visibility,
-                                contentDescription = "Answer",
-                                tint = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.size(20.dp)
+                                imageVector = Icons.Default.FastForward,
+                                contentDescription = "Skip",
+                                tint = extColors.warning,
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.height(3.dp))
+                            Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = "Ans.",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.secondary
+                                text = "Skip",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                fontWeight = FontWeight.SemiBold,
+                                color = extColors.warning,
+                                maxLines = 1
                             )
                         }
                     }
 
-                    // 4. Next / Done Grid Box
+                    // 6. Next Button
                     Surface(
                         onClick = {
                             if (focusLockEnabled && timerIsRunning) {
@@ -469,12 +559,12 @@ fun SectionStudyScreen(
                                 onNavigateToReview(lessonId)
                             }
                         },
-                        shape = RoundedCornerShape(16.dp),
+                        shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.primary,
                         shadowElevation = 2.dp,
                         modifier = Modifier
                             .weight(1f)
-                            .height(58.dp)
+                            .height(54.dp)
                             .testTag("study_done_button")
                             .testTag("study_next_button")
                     ) {
@@ -487,14 +577,15 @@ fun SectionStudyScreen(
                                 imageVector = if (nextSection != null) Icons.AutoMirrored.Filled.ArrowForward else Icons.Default.Check,
                                 contentDescription = if (nextSection != null) "Next" else "Done",
                                 tint = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.height(3.dp))
+                            Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = if (nextSection != null) "Next" else "Done",
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimary
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                maxLines = 1
                             )
                         }
                     }
@@ -569,16 +660,6 @@ fun SectionStudyScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                     }
-                }
-            }
-
-            // Practice Countdown Timer (Survives rotation, drift-free)
-            if (timerDurationSeconds > 0) {
-                item {
-                    SectionTimerControl(
-                        viewModel = viewModel,
-                        initialSeconds = timerDurationSeconds
-                    )
                 }
             }
 
@@ -825,7 +906,7 @@ fun SectionStudyScreen(
         ModalBottomSheet(
             onDismissRequest = {
                 showModelAnswer = false
-                showAnswerSettings = false
+                showAnswerSettingsMenu = false
             },
             sheetState = answerSheetState,
             containerColor = MaterialTheme.colorScheme.surface,
@@ -888,96 +969,41 @@ fun SectionStudyScreen(
                             }
                         }
 
-                        // Settings Gear button (replacing 'X' button as requested)
-                        IconButton(
-                            onClick = { showAnswerSettings = !showAnswerSettings },
-                            modifier = Modifier.testTag("answer_settings_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Settings,
-                                contentDescription = "Answer Settings",
-                                tint = if (showAnswerSettings) MaterialTheme.colorScheme.primary else extColors.textMuted,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    }
-                }
-
-                // Settings Panel (Font Size Controls & Line Selection Toggle)
-                AnimatedVisibility(visible = showAnswerSettings) {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 10.dp)
-                            .testTag("answer_settings_card"),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f))
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                        // Settings Gear button with Popup Menu: "মডেল আন্সারের সেটিং এর গিয়ার আইকনে ক্লিক করলে পপ আপ মেন্যু আসবে"
+                        Box {
+                            IconButton(
+                                onClick = { showAnswerSettingsMenu = true },
+                                modifier = Modifier.testTag("answer_settings_button")
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.Settings,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "Answer Settings",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                                Text(
-                                    text = "Auto-saved",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = "Answer Settings",
+                                    tint = if (showAnswerSettingsMenu) MaterialTheme.colorScheme.primary else extColors.textMuted,
+                                    modifier = Modifier.size(22.dp)
                                 )
                             }
 
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            // 1. Font Size Control
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                            DropdownMenu(
+                                expanded = showAnswerSettingsMenu,
+                                onDismissRequest = { showAnswerSettingsMenu = false }
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.FormatSize,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Font Size: ${answerFontSize.toInt()} sp",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-
+                                Text(
+                                    text = "Font Size: ${answerFontSize.toInt()} sp",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                )
                                 Row(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     listOf(14f, 16f, 18f, 20f, 22f).forEach { size ->
                                         val isSelected = answerFontSize.toInt() == size.toInt()
                                         Surface(
                                             shape = RoundedCornerShape(6.dp),
-                                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
-                                            border = if (isSelected) null else BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)),
-                                            modifier = Modifier
-                                                .clickable { viewModel.setAnswerFontSize(size) }
-                                                .testTag("font_size_${size.toInt()}")
+                                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                            modifier = Modifier.clickable { viewModel.setAnswerFontSize(size) }
                                         ) {
                                             Text(
                                                 text = "${size.toInt()}",
@@ -989,41 +1015,33 @@ fun SectionStudyScreen(
                                         }
                                     }
                                 }
-                            }
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
 
-                            // 2. Line Selection Toggle Button
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Select lines separately",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        text = "প্রতিটি লাইন আলাদাভাবে স্পর্শ করে বুকমার্কে সংরক্ষণ করুন",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Switch(
-                                    checked = answerLineSelectionMode,
-                                    onCheckedChange = { viewModel.setAnswerLineSelectionMode(it) },
-                                    modifier = Modifier.testTag("line_selection_toggle")
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = "Select lines separately",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    },
+                                    trailingIcon = {
+                                        Switch(
+                                            checked = answerLineSelectionMode,
+                                            onCheckedChange = { viewModel.setAnswerLineSelectionMode(it) }
+                                        )
+                                    },
+                                    onClick = {
+                                        viewModel.setAnswerLineSelectionMode(!answerLineSelectionMode)
+                                    }
                                 )
                             }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // Helpful banner when line selection mode is active
                 if (answerLineSelectionMode) {
@@ -1047,7 +1065,7 @@ fun SectionStudyScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "যে কোনো লাইন স্পর্শ করুন — সরাসরি বুকমার্ক মেনুতে সংরক্ষিত হবে",
+                                text = "Tap any sentence to bookmark",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Color(0xFF07894A),
                                 fontWeight = FontWeight.SemiBold
@@ -1056,7 +1074,7 @@ fun SectionStudyScreen(
                     }
                 }
 
-                // Answer Content
+                // Answer Content: Lines remain in normal paragraphs
                 if (currentSection.modelAnswer.isNotBlank()) {
                     Box(
                         modifier = Modifier
@@ -1065,82 +1083,82 @@ fun SectionStudyScreen(
                             .verticalScroll(rememberScrollState())
                     ) {
                         if (answerLineSelectionMode) {
-                            // Touch-to-select line mode
-                            val answerLines = remember(currentSection.modelAnswer) {
-                                val raw = currentSection.modelAnswer.trim()
-                                val paragraphs = raw.split("\n").map { it.trim() }.filter { it.isNotBlank() }
-                                val result = mutableListOf<String>()
-                                for (p in paragraphs) {
-                                    if (p.contains(Regex("[।!?.]\\s+"))) {
-                                        val sentences = p.split(Regex("(?<=[।!?.])\\s+")).map { it.trim() }.filter { it.isNotBlank() }
-                                        result.addAll(sentences)
-                                    } else {
-                                        result.add(p)
-                                    }
-                                }
-                                if (result.isEmpty()) listOf(raw) else result
+                            // Touch-to-select line mode: regular paragraphs where lines are clickable
+                            var activeZoomImage by remember { mutableStateOf<RichBlock.Image?>(null) }
+                            activeZoomImage?.let { img ->
+                                ImageZoomDialog(
+                                    imageUrl = img.url,
+                                    altText = img.altText,
+                                    onDismiss = { activeZoomImage = null }
+                                )
                             }
 
+                            val blocks = remember(currentSection.modelAnswer) {
+                                splitContentIntoRichBlocks(currentSection.modelAnswer.lines())
+                            }
                             Column(
                                 modifier = Modifier.fillMaxWidth(),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                verticalArrangement = Arrangement.spacedBy(14.dp)
                             ) {
-                                answerLines.forEachIndexed { index, lineText ->
-                                    val isBookmarked = bookmarkedLines.any {
-                                        it.sectionId == currentSection.id && it.lineText.trim() == lineText.trim()
-                                    }
-
-                                    Surface(
-                                        shape = RoundedCornerShape(10.dp),
-                                        color = if (isBookmarked) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                                        border = if (isBookmarked) {
-                                            BorderStroke(1.5.dp, Color(0xFF07894A))
-                                        } else {
-                                            BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
-                                        },
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                viewModel.toggleLineBookmark(
-                                                    lessonId = currentLesson.id,
-                                                    sectionId = currentSection.id,
-                                                    lessonTitle = currentLesson.title,
-                                                    sectionTitle = currentSection.title.cleanDisplayTitle(),
-                                                    lineText = lineText.trim()
-                                                ) { added ->
-                                                    Toast.makeText(
-                                                        context,
-                                                        if (added) "লাইনটি বুকমার্ক মেনুতে সংরক্ষিত হয়েছে ✓" else "লাইনটি বুকমার্ক থেকে সরানো হয়েছে",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
-                                                }
-                                            }
-                                            .testTag("answer_line_$index")
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 14.dp, vertical = 10.dp),
-                                            verticalAlignment = Alignment.Top,
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
-                                            BanglaAwareText(
-                                                text = lineText,
-                                                style = MaterialTheme.typography.bodyLarge.copy(
-                                                    fontSize = answerFontSize.sp,
-                                                    lineHeight = (answerFontSize * 1.5f).sp
-                                                ),
-                                                color = if (isBookmarked) Color(0xFF1B5E20) else MaterialTheme.colorScheme.onSurface,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Icon(
-                                                imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
-                                                contentDescription = if (isBookmarked) "Saved to bookmarks" else "Touch to bookmark line",
-                                                tint = if (isBookmarked) Color(0xFF07894A) else extColors.textMuted.copy(alpha = 0.4f),
+                                blocks.forEach { block ->
+                                    when (block) {
+                                        is RichBlock.Image -> {
+                                            Card(
                                                 modifier = Modifier
-                                                    .size(20.dp)
-                                                    .padding(top = 2.dp)
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .clickable { activeZoomImage = block },
+                                                shape = RoundedCornerShape(12.dp),
+                                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                                            ) {
+                                                coil.compose.SubcomposeAsyncImage(
+                                                    model = block.url,
+                                                    contentDescription = block.altText,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .heightIn(max = 320.dp),
+                                                    contentScale = ContentScale.Fit
+                                                )
+                                            }
+                                        }
+                                        is RichBlock.Table -> {
+                                            LessonTableView(table = block.table)
+                                        }
+                                        is RichBlock.Paragraph -> {
+                                            ParagraphLineSelectionView(
+                                                text = block.text,
+                                                fontSize = answerFontSize.sp,
+                                                bookmarkedLines = bookmarkedLines,
+                                                sectionId = currentSection.id,
+                                                onLineClicked = { lineText ->
+                                                    selectedLineForBookmark = lineText
+                                                }
+                                            )
+                                        }
+                                        is RichBlock.BulletItem -> {
+                                            ParagraphLineSelectionView(
+                                                text = block.prefix + " " + block.text,
+                                                fontSize = answerFontSize.sp,
+                                                bookmarkedLines = bookmarkedLines,
+                                                sectionId = currentSection.id,
+                                                onLineClicked = { lineText ->
+                                                    selectedLineForBookmark = lineText
+                                                }
+                                            )
+                                        }
+                                        is RichBlock.Latex -> {
+                                            LatexBlockView(
+                                                latex = block.latex,
+                                                fontSize = answerFontSize.sp
+                                            )
+                                        }
+                                        is RichBlock.Subheading -> {
+                                            Text(
+                                                text = block.text,
+                                                style = if (block.level == 3) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
                                             )
                                         }
                                     }
@@ -1174,7 +1192,7 @@ fun SectionStudyScreen(
                 Button(
                     onClick = {
                         showModelAnswer = false
-                        showAnswerSettings = false
+                        showAnswerSettingsMenu = false
                     },
                     modifier = Modifier.fillMaxWidth().testTag("close_model_answer_button"),
                     shape = RoundedCornerShape(12.dp),
@@ -1186,4 +1204,493 @@ fun SectionStudyScreen(
             }
         }
     }
+
+    // 1. Timer Popup Dialog
+    if (showTimerPopup) {
+        val remainingSeconds by viewModel.timerRemainingSeconds.collectAsState()
+        val totalSeconds by viewModel.timerTotalSeconds.collectAsState()
+        val isRunning by viewModel.timerIsRunning.collectAsState()
+        val isFinished by viewModel.timerIsFinished.collectAsState()
+        val focusLock by viewModel.focusLockEnabled.collectAsState()
+
+        val minutes = remainingSeconds / 60
+        val seconds = remainingSeconds % 60
+        val formattedTime = String.format("%02d:%02d", minutes, seconds)
+
+        AlertDialog(
+            onDismissRequest = { showTimerPopup = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Timer,
+                    contentDescription = null,
+                    tint = if (isRunning) MaterialTheme.colorScheme.primary else extColors.textMuted,
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "Practice Timer",
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, if (isRunning) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = formattedTime,
+                                style = MaterialTheme.typography.displayMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isFinished) extColors.danger else if (isRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = if (isFinished) "Time's up!" else if (isRunning) "Timer is running..." else "Timer paused / ready",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = extColors.textMuted
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { viewModel.resetTimer(timerDurationSeconds) },
+                            shape = CircleShape,
+                            modifier = Modifier.padding(end = 8.dp)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Reset", modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Reset", style = MaterialTheme.typography.labelMedium)
+                        }
+
+                        Button(
+                            onClick = {
+                                if (isRunning) {
+                                    viewModel.pauseTimer()
+                                } else {
+                                    viewModel.startTimer()
+                                }
+                            },
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isRunning) extColors.warning else MaterialTheme.colorScheme.primary
+                            )
+                        ) {
+                            Icon(
+                                imageVector = if (isRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (isRunning) "Pause" else "Start",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (isRunning) "Pause" else "Start", fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = { viewModel.addTimerMinute() },
+                            shape = CircleShape,
+                            modifier = Modifier.padding(start = 8.dp)
+                        ) {
+                            Text("+1m", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        listOf(5, 10, 15, 20).forEach { mins ->
+                            val isCurrentPreset = (totalSeconds / 60) == mins
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isCurrentPreset) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                border = if (isCurrentPreset) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
+                                modifier = Modifier.clickable {
+                                    viewModel.resetTimer(mins * 60)
+                                }
+                            ) {
+                                Text(
+                                    text = "${mins}m",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = if (isCurrentPreset) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isCurrentPreset) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                tint = if (focusLock) MaterialTheme.colorScheme.primary else extColors.textMuted,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Focus Lock",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        Switch(
+                            checked = focusLock,
+                            onCheckedChange = { viewModel.setFocusLock(it) }
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTimerPopup = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+    // 2. Section List ModalBottomSheet
+    if (showSectionListPopup) {
+        val listSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+        ModalBottomSheet(
+            onDismissRequest = { showSectionListPopup = false },
+            sheetState = listSheetState,
+            containerColor = MaterialTheme.colorScheme.surface,
+            dragHandle = { BottomSheetDefaults.DragHandle() },
+            modifier = Modifier.fillMaxHeight(0.85f)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 6.dp)
+                    .navigationBarsPadding()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.FormatListNumbered,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Section List (${sections.size})",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    IconButton(onClick = { showSectionListPopup = false }) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(sections.size) { index ->
+                        val sec = sections[index]
+                        val isCurrent = sec.id == currentSection.id
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = when {
+                                isCurrent -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                                sec.isCompleted -> extColors.successContainer.copy(alpha = 0.3f)
+                                sec.isSkipped -> extColors.warningContainer.copy(alpha = 0.3f)
+                                else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                            },
+                            border = BorderStroke(
+                                width = if (isCurrent) 1.5.dp else 0.5.dp,
+                                color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (sec.id != currentSection.id) {
+                                        if (draftText != currentSection.userDraft) {
+                                            viewModel.saveDraft(currentSection.id, draftText)
+                                        }
+                                        showSectionListPopup = false
+                                        onNavigateToSection(lessonId, sec.id)
+                                    } else {
+                                        showSectionListPopup = false
+                                    }
+                                }
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier.size(26.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = "${sec.order}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isCurrent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    BanglaAwareText(
+                                        text = sec.title.cleanDisplayTitle(),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(8.dp))
+
+                                when {
+                                    sec.isCompleted -> {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = "Completed",
+                                            tint = extColors.success,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    sec.isSkipped -> {
+                                        Icon(
+                                            imageVector = Icons.Default.FastForward,
+                                            contentDescription = "Skipped",
+                                            tint = extColors.warning,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    isCurrent -> {
+                                        Text(
+                                            text = "Active",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Line Bookmark Popup Dialog: "ক্লিক করলে একটা বুকমার্ক পপআপ আসবে"
+    if (selectedLineForBookmark != null) {
+        val lineText = selectedLineForBookmark!!
+        val isBookmarked = bookmarkedLines.any {
+            it.sectionId == currentSection.id && it.lineText.trim() == lineText.trim()
+        }
+
+        AlertDialog(
+            onDismissRequest = { selectedLineForBookmark = null },
+            icon = {
+                Icon(
+                    imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                    contentDescription = null,
+                    tint = if (isBookmarked) Color(0xFF07894A) else MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = if (isBookmarked) "Bookmarked Sentence" else "Bookmark Sentence",
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isBookmarked) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, if (isBookmarked) Color(0xFF07894A).copy(alpha = 0.4f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        BanglaAwareText(
+                            text = lineText,
+                            style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(14.dp)
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                ExportManager.copyToClipboard(context, lineText, "Sentence")
+                                Toast.makeText(context, "Sentence copied to clipboard", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Copy", style = MaterialTheme.typography.labelMedium)
+                        }
+
+                        Button(
+                            onClick = {
+                                viewModel.toggleLineBookmark(
+                                    lessonId = currentLesson.id,
+                                    sectionId = currentSection.id,
+                                    lessonTitle = currentLesson.title,
+                                    sectionTitle = currentSection.title.cleanDisplayTitle(),
+                                    lineText = lineText.trim()
+                                ) { added ->
+                                    Toast.makeText(
+                                        context,
+                                        if (added) "Line bookmarked ✓" else "Line removed from bookmarks",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                                selectedLineForBookmark = null
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isBookmarked) MaterialTheme.colorScheme.error else Color(0xFF07894A)
+                            ),
+                            modifier = Modifier.weight(1.3f)
+                        ) {
+                            Icon(
+                                imageVector = if (isBookmarked) Icons.Default.BookmarkRemove else Icons.Default.BookmarkAdd,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isBookmarked) "Remove" else "Bookmark",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedLineForBookmark = null }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+}
+
+/**
+ * Renders a regular text paragraph with interactive, clickable sentence spans for line selection mode.
+ * The paragraph maintains standard flowing text formatting without disruptive separate boxes.
+ */
+@Composable
+private fun ParagraphLineSelectionView(
+    text: String,
+    fontSize: TextUnit,
+    bookmarkedLines: List<BookmarkedLine>,
+    sectionId: String,
+    onLineClicked: (String) -> Unit
+) {
+    val sentences = remember(text) {
+        if (text.contains(Regex("[।!?.]\\s+"))) {
+            text.split(Regex("(?<=[।!?.])\\s+")).map { it.trim() }.filter { it.isNotBlank() }
+        } else {
+            listOf(text.trim()).filter { it.isNotBlank() }
+        }
+    }
+
+    if (sentences.isEmpty()) return
+
+    val annotatedString = buildAnnotatedString {
+        sentences.forEachIndexed { index, sentence ->
+            val isBookmarked = bookmarkedLines.any {
+                it.sectionId == sectionId && it.lineText.trim() == sentence.trim()
+            }
+            pushStringAnnotation(tag = "SENTENCE", annotation = sentence)
+            withStyle(
+                SpanStyle(
+                    background = if (isBookmarked) Color(0x354CAF50) else Color(0x102196F3),
+                    textDecoration = if (isBookmarked) TextDecoration.Underline else TextDecoration.None,
+                    color = if (isBookmarked) Color(0xFF1B5E20) else MaterialTheme.colorScheme.onSurface,
+                    fontWeight = if (isBookmarked) FontWeight.SemiBold else FontWeight.Normal
+                )
+            ) {
+                append(sentence)
+            }
+            pop()
+            if (index < sentences.size - 1) {
+                append(" ")
+            }
+        }
+    }
+
+    var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+
+    Text(
+        text = annotatedString,
+        style = MaterialTheme.typography.bodyLarge.copy(
+            fontSize = fontSize,
+            lineHeight = (fontSize.value * 1.6f).sp
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .pointerInput(annotatedString) {
+                detectTapGestures { offset ->
+                    textLayoutResult?.let { layout ->
+                        val charOffset = layout.getOffsetForPosition(offset)
+                        annotatedString
+                            .getStringAnnotations(tag = "SENTENCE", start = charOffset, end = charOffset)
+                            .firstOrNull()
+                            ?.let { annotation ->
+                                onLineClicked(annotation.item)
+                            }
+                    }
+                }
+            },
+        onTextLayout = { textLayoutResult = it }
+    )
 }
